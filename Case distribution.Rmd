@@ -1,0 +1,501 @@
+---
+title: "Question 1"
+author: "Kari Zhou"
+date: "2026-03-16"
+output: html_document
+---
+
+######## changes Apr7-14
+
+```{r}
+library(readxl)
+library(tidyr)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(stringr)
+library(zoo)
+post_standing = read.csv("Data/Case Division Data _ Post Standing Order _ Post-Indictment Assignments(Sheet1).csv")[,-c(10:11)] 
+pre_standing = read.csv("Data/Case Division Data _ Pre Standing Order _ Post-Indictment Assignments.csv")
+# check column names for rbind later
+colnames(post_standing)
+colnames(pre_standing)
+# data processing, convert date and add stage flag
+pre_standing = pre_standing %>% 
+  filter(grepl("Division", Division)) %>% 
+  mutate(stage = "pre_standing",
+         case_nbr = Case.Number,
+         party_id = Party.ID,
+         case_id = Case.ID,
+         defendant = Defendant.Name,
+         Division = str_remove(Division, "ivision "),
+         date_assigned = as.Date(ifelse(Division.Assignment.TimeStamp.Created == "" | is.na(Division.Assignment.TimeStamp.Created),
+                                       NA, Division.Assignment.TimeStamp.Created), 
+                                format = "%m/%d/%y"),
+         ) %>% 
+  
+  select(case_nbr,party_id, case_id, defendant, Division, date_assigned, stage ) #20718
+  
+post_standing = post_standing %>%  
+  filter(grepl("Division", Division)) %>% 
+  mutate(stage = "post_standing",
+         case_nbr = Case.Number,
+         party_id = Party.ID,
+         case_id = Case.ID,
+         defendant = Defendant.Name,
+         Division = str_remove(Division, "ivision "),
+         date_assigned = as.Date(ifelse(Division.Assignment.TimeStamp.Created == "" | is.na(Division.Assignment.TimeStamp.Created), NA, Division.Assignment.TimeStamp.Created),  
+                                 format = "%m/%d/%Y"),
+         ) %>% 
+  select(case_nbr,party_id, case_id, defendant, Division, date_assigned, stage ) #14241
+
+attorney_levels <- paste(
+  rep(paste0("D", 1:10), each = 2),
+  rep(c("odd", "even"), times = 10)
+)
+
+# define covid shutdown period
+covid_period <- data.frame(
+  x1 = as.yearqtr("2020-03-01",  format = "%Y-%m-%d"),
+  x2 = as.yearqtr("2021-06-01", format = "%Y-%m-%d"),
+  y1 = - Inf,
+  y2 = Inf
+)
+
+
+```
+# link each assignment row with a case received date (earliest)
+```{r}
+CR_case_data <- read.csv("data/case_data_cr.csv")
+CR_case_data <- CR_case_data %>% 
+  mutate(
+         case_nbr = Case.Number,
+         party_id = Party.ID,
+         DA_id = DA.ID,
+         defendant = Defendant,
+         offense_date = as.Date(ifelse(Offense.Date == "" | is.na(Offense.Date),
+                                       NA, Offense.Date), 
+                                format = "%m/%d/%Y"),
+         arrest_date = as.Date(ifelse(Arrest.Date == "" | is.na(Arrest.Date),
+                                       NA, Arrest.Date), 
+                                format = "%m/%d/%Y"),
+         received_date = as.Date(ifelse(Received.Date == "" | is.na(Received.Date),
+                                       NA, Received.Date), 
+                                format = "%m/%d/%Y"),
+         case_status_date = as.Date(ifelse(Case.Status.Date == "" | is.na(Case.Status.Date),
+                                       NA, Case.Status.Date), 
+                                format = "%m/%d/%Y"),
+         offense_code = Offense.Code
+         ) %>% 
+  select(case_nbr, party_id, DA_id, defendant, offense_date, arrest_date, received_date
+         , case_status_date, Offense, offense_code, Unit)
+
+colnames(CR_case_data)  
+```
+
+```{r}
+# for post standing cases, look for first attorney assignment
+# keep the earliest assignment of attorney
+# on case-defendant level
+attorney_parity_new <- function(df) {
+  df_early <- df %>%
+    mutate(
+      parity = ifelse(
+        as.numeric(substr(case_nbr, nchar(case_nbr), nchar(case_nbr))) %% 2 == 0,
+        "even",
+        "odd"
+      ),
+      Attorney = paste(Division, parity)
+    )
+  return(df_early)
+}
+
+post_standing_cd = attorney_parity_new(post_standing) %>% filter(!case_nbr == "TESTSTCRIM")
+# 10357 cases (post indictment, after standing order), excluding test criminal
+pre_standing_cd = attorney_parity_new(pre_standing) %>% filter(!is.na(parity))
+# 16665 cases (post indictment, before standing order), excluding case numbers not ending with a number
+```
+
+
+```{r}
+post_indictemnt_cd = rbind(post_standing_cd, pre_standing_cd) %>% 
+  filter(!is.na(case_nbr)) %>% 
+  group_by(case_nbr, party_id
+           ) %>% 
+  slice(which.min(date_assigned)) # 26381 cases
+
+post_indictemnt_cd$Attorney <- factor(
+    post_indictemnt_cd$Attorney,
+    levels = attorney_levels
+)
+
+post_indictment_all_cd = left_join(post_indictemnt_cd[,c(1:9)], 
+                               CR_case_data[,c("received_date", "case_nbr", "party_id", "Unit", "offense_code", "Offense")],
+                               by = c("case_nbr", "party_id"))
+post_indictment_all_cd = post_indictment_all_cd[!duplicated(post_indictment_all_cd),] 
+
+# for each case-defendant, keep the earliest assigned date
+post_indictment_all_cd <- post_indictment_all_cd %>% 
+  group_by(case_nbr, party_id) %>% 
+  slice(which.min(date_assigned)) %>% 
+  filter(!is.na(offense_code))
+  #28923, case-defendant level
+```
+
+```{r}
+# filter for special units 
+special_labels = c("DVSA", "CCU", "CAEPAD", "HTIC")
+
+post_indictment_special_units = post_indictment_all_cd %>% 
+  filter(Unit %in% special_labels) #3079
+
+# check there's only one row kept for each case-offense-defendant group. 
+post_indictment_special_units %>% 
+  group_by(case_nbr, offense_code, party_id) %>% 
+  filter(n()>1) #0 
+```
+
+# major crimes
+
+```{r}
+major_crime_levels = c("Homicide/Gangs", "FVPU")
+
+post_indictment_major = post_indictment_all_cd %>% filter(Unit %in% major_crime_levels)
+
+post_indictment_major
+
+```
+
+
+```{r}
+post_indictment_all_cd <- post_indictment_all_cd %>% 
+  mutate(Group = case_when(Unit %in% major_crime_levels ~ "Major Crimes",
+                           Unit %in% special_labels ~"SVU Crimes",
+                           Unit %in% "Trial Division" ~ "Trial Division",
+                           TRUE  ~ "No Units Entered"
+                           )) %>%  #28923 %>% 
+filter(date_assigned > "2017-12-31", date_assigned < "2025-04-01") 
+
+
+post_indictment_all_cd # 29822, from 2018 to 2025Q1
+```
+
+# distribution, assigned date
+```{r}
+assigned_date <- post_indictment_all_cd %>% 
+  filter(!Group == "No Units Entered") %>% 
+  mutate(quarter = as.yearqtr(date_assigned, format = "%Y-%m-%d")) %>% 
+  group_by(quarter, Group) %>% 
+  summarise(count = n()) %>% 
+  ggplot(aes(x = quarter, y = count, color = Group))+
+  scale_x_yearqtr(format = "%YQ%q", n = 14) +
+  geom_line(linewidth = 1)+
+    scale_color_manual(values = c(
+    "Trial Division" = "navy",
+    #"No Units Entered" = "lightblue",
+    "Major Crimes" = "tan4",
+    "SVU Crimes" = "blue"
+  ))+
+  geom_rect(data= covid_period, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), 
+            fill = "orange",
+            alpha = 0.3, inherit.aes = FALSE)+
+  labs(title = "CR-Cases Assigned to Different Units Over Time (Case-Defendant Level)",
+       x = "Time assigned",
+       y = "Number of Cases")+
+  theme_bw()+
+    theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.text = element_text(size = 7),   
+    legend.title = element_text(size = 8),
+    legend.position = "right"              
+  )
+
+assigned_date
+```
+
+# distribution, received date
+```{r}
+
+received_date <- post_indictment_all_cd %>% 
+  filter(!Group == "No Units Entered") %>% 
+  mutate(quarter = as.yearqtr(received_date, format = "%Y-%m-%d")) %>% 
+  filter(received_date >= "2018-01-01") %>% 
+  group_by(quarter, Group) %>% 
+  summarise(count = n()) %>% 
+  ggplot(aes(x = quarter, y = count, color = Group))+
+  scale_x_yearqtr(format = "%YQ%q", n = 14) +
+  geom_line(linewidth = 1)+
+    scale_color_manual(values = c(
+    "Trial Division" = "navy",
+    #"No Units Entered" = "lightblue",
+    "Major Crimes" = "tan4",
+    "SVU Crimes" = "blue"
+  ))+
+  geom_rect(data= covid_period, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), 
+            fill = "orange",
+            alpha = 0.3, inherit.aes = FALSE)+
+  labs(title = "CR-Cases Received by Different Units Over Time (Case-Defendant Level)",
+       x = "Time received",
+       y = "Number of Cases")+
+  theme_bw()+
+    theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.text = element_text(size = 7),   
+    legend.title = element_text(size = 8),
+    legend.position = "right"              
+  )
+
+received_date
+```
+
+# average per attorney, assigned date
+```{r}
+post_indictment_all_cd %>% 
+   mutate(quarter = as.yearqtr(date_assigned, format = "%Y-%m-%d")) %>% 
+  group_by(quarter, Attorney) %>% 
+  summarise(count = n()
+            ) %>% 
+  group_by(quarter) %>% 
+  summarise(average = mean(count)) %>% 
+  ggplot(aes(x = quarter, y = average))+
+  scale_x_yearqtr(format = "%YQ%q", n = 15) +
+  geom_line(color = "navy", linewidth = 1)+
+  geom_rect(data= covid_period, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), 
+            fill = "orange",
+            alpha = 0.3, inherit.aes = FALSE)+
+  labs(title = "CR Cases Assigned Per Attorney Over Time(Case-Defendant Level)",
+       x = "Time assigned",
+       y = "Quarterly Average")+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+```{r}
+post_indictment_all_cd %>% 
+   mutate(quarter = as.yearqtr(received_date, format = "%Y-%m-%d")) %>% 
+  filter(received_date >= "2018-01-01") %>% 
+  group_by(quarter, Attorney) %>% 
+  summarise(count = n()
+            ) %>% 
+  group_by(quarter) %>% 
+  summarise(average = mean(count)) %>% 
+  ggplot(aes(x = quarter, y = average))+
+  scale_x_yearqtr(format = "%YQ%q", n = 15) +
+  geom_line(color = "navy", linewidth = 1)+
+  geom_rect(data= covid_period, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), 
+            fill = "orange",
+            alpha = 0.3, inherit.aes = FALSE)+
+  labs(title = "CR Cases Received by Each Attorney Over Time(Case-Defendant Level)",
+       x = "Time received",
+       y = "Quarterly Average")+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+# side by side graph 
+```{r}
+gridExtra::grid.arrange(received_date, assigned_date)
+```
+
+
+```{r}
+
+# sum of caseload per attorney, quarterly
+attorney_quarter_count  = post_indictment_cr %>% 
+  group_by(quarter, Attorney, Group) %>%
+  summarise(count = n())
+
+attorney_quarter_count$Attorney <- factor(
+    attorney_quarter_count$Attorney ,
+    levels = attorney_levels
+) 
+# average number of cases assigned to each attorney within the quarter. 
+attorney_quarter_sum <- attorney_quarter_count %>% group_by(quarter, Group) %>% summarise(average = mean(count)) 
+
+#This was!
+ggplot()+
+ geom_line(data = attorney_quarter_sum, aes(x = quarter , y = average, color = Group),
+           linewidth = 1)+
+  geom_point(data = attorney_quarter_sum, aes(x = quarter , y = average, color = Group))+
+  scale_x_yearqtr(format = "%YQ%q", n = 15)+
+  scale_color_manual(values = c(
+    "Trial Division" = "navy",
+    "No Units Entered" = "lightblue",
+    "Major Crimes" = "tan4",
+    "Special Units" = "blue"
+  ))+
+  labs(x = "Time when case was received",
+       y = "Count",
+       title = "Quarterly Average Caseload per Attorney Across Different Divisions (Case-Level)")+
+  geom_rect(data= covid_period, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), fill = "orange",
+            alpha = 0.3)+
+  theme_bw() + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.text = element_text(size = 7),   
+    legend.title = element_text(size = 8),
+    legend.position = "bottom"              
+  )
+```
+
+###### AI use: 
+prompt: I have two datasets: one df has a column of code (1-1-1(a), for example), and the other df has reference code (1-1-1). i want to filter for all rows in the df that contain the mother-level code in the refernece df
+response: 
+```{r}
+pattern <- ref_df$ref_code |>
+  sapply(FUN = \(x) gsub("([.\\-])", "\\\\\\1", x)) |>
+  paste(collapse = "|")
+
+filtered_df <- df |>
+  filter(grepl(pattern, code))
+```
+
+```{r}
+pattern <- svf_code$offense_code |>
+  sapply(FUN = \(x) gsub("([.\\-])", "\\\\\\1", x)) |>
+  paste(collapse = "|")
+
+post_indictment_svf = post_indictment_cr |>
+  filter(grepl(pattern, offense_code),
+         Unit != "Trial Division",
+         !Unit %in% special_labels) #549
+```
+
+
+
+
+```{r}
+# assign colors to each division
+custom_colors <- c(
+  "D1 odd"  = "#00008B",
+  "D1 even" = "#00008B",
+
+  "D2 odd"  = "#8B4513",
+  "D2 even" = "#8B4513",
+
+  "D3 odd"  = "#FF8C00",
+  "D3 even" = "#FF8C00",
+
+  "D4 odd"  = "#2F4F4F",
+  "D4 even" = "#2F4F4F",
+
+  "D5 odd"  = "#006400",
+  "D5 even" = "#006400",
+
+  "D6 odd"  = "#8B0000",
+  "D6 even" = "#8B0000",
+
+  "D7 odd"  = "#4B0082",
+  "D7 even" = "#4B0082",
+
+  "D8 odd"  = "#00688B",
+  "D8 even" = "#00688B",
+
+  "D9 odd"  = "#556B2F",
+  "D9 even" = "#556B2F",
+
+  "D10 odd"  = "#8B008B",
+  "D10 even" = "#8B008B"
+)
+
+
+```
+
+
+
+```{r}
+# define function for plotting graphs (specific breakdown, by each quarter)
+filter_by_division <- function(df) {
+  df <- df %>% 
+    mutate(quarter = as.yearqtr(date_assigned,  format = "%Y-%m-%d"))
+quarters <- unique(df$quarter)
+
+   for (i in 1:length(quarters)) {
+   q <- quarters[i]
+  
+  filtered <- df %>%
+    filter(quarter == q) %>%
+            group_by(Attorney) %>%
+            summarise(n = n(), .groups = "drop") %>%
+            arrange(Attorney)
+
+        name <- paste(q, sep = "_")
+
+        p <- ggplot(filtered, aes(x = Attorney, y = n, fill = Attorney)) +
+            geom_col() +
+            scale_fill_manual(values = custom_colors) +
+            labs(
+                title = paste("Initial Attorney Assignment -", q),
+                x = "Division",
+                y = "Count"
+            ) +
+          ylim(0, 75)+
+            theme_bw(base_size = 10) +
+            coord_cartesian(ylim = c(0, 75)) +
+            theme(
+                legend.position = "none",
+                axis.text.x = element_text(angle = 20, hjust = 1)
+            )
+      ggsave(filename = paste0("Trial_division_",  q, ".png"),
+      plot = p,
+      width = 8, height = 5)
+      print(p)
+    }
+}
+```
+ 
+```{r} 
+#Graphing
+filter_by_division(post_indictment_trial)
+
+```
+
+```{r} 
+# define function for plotting graphs (specific breakdown, by each quarter)
+filter_by_unit <- function(df) {
+  df <- df %>% 
+    mutate(quarter = as.yearqtr(date_assigned,  format = "%Y-%m-%d"))
+quarters <- unique(df$quarter)
+
+      for (i in 1:length(quarters)) {
+   q <- quarters[i]
+
+        filtered <- df %>%
+            filter(quarter == q) %>%
+            group_by(Attorney, Unit) %>%
+            summarise(count = n(), .groups = "drop") %>%
+            arrange(Unit)
+
+        name <- paste(q, sep = "_")
+
+        p <- ggplot(filtered, aes(x = Attorney, y = count, fill = Unit)) +
+            geom_col() +
+           scale_fill_manual(values = c("DVSA" = "wheat", 
+                                "CCU" = "#daa520",
+                                "CAEPAD" = "tan4", 
+                                "HTIC" = "slategrey" ,
+                                "ACU" = "cornflowerblue",
+                                "FVPU" = "#4169B0",
+                                "Homicide/Gangs" = "orange"))+
+          ylim(0, 75)+
+            labs(
+                title = paste("Special Units Caseload Distribution -", q),
+                x = "Unit",
+                y = "Count"
+            ) +
+          
+            theme_bw(base_size = 10) +
+            theme(
+                legend.position = "right",
+                axis.text.x = element_text(angle = 20, hjust = 1)
+            )
+      ggsave(filename = paste0("special_unit_",  q, ".png"),
+      plot = p,
+      width = 8, height = 5)
+      print(p)
+    }
+}
+
+filter_by_unit(post_indictment_special_units)
+post_indictment_special_units %>% filter(Unit == "FVPU")
+```
+

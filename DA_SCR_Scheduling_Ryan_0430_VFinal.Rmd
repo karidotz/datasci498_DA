@@ -1,0 +1,1003 @@
+---
+title: "DA_SCR_Scheduling_Ryan_0430_VFinal"
+author: "Ryan Wang"
+date: "2026-04-30"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load necessary packages
+library(tidyverse)
+library(janitor)
+library(ggplot2)
+library(stringr)
+library(lubridate)
+getwd()
+# Load data
+hearing_data <- read.csv("/Users/karizhou/Desktop/SPRING 26/Capstone/Data/Hearing Data - Comments(Hearing Data - Comments).csv")
+
+cases_charged_data <- read.csv("/Users/karizhou/Desktop/SPRING 26/Capstone/Data/Cases Charged Data.csv")
+case_assignment_data <- read.csv("/Users/karizhou/Desktop/SPRING 26/Capstone/Data/Case Division Data _ Post Standing Order _ Post-Indictment Assignments(Sheet1).csv")
+bench_warrant_data <- read.csv("/Users/karizhou/Desktop/SPRING 26/Capstone/Data/Bench Warrant Data(Bench Warrant Data).csv")
+cases_closed_data <- read.csv("/Users/karizhou/Desktop/SPRING 26/Capstone/Data/Cases Closed Data.csv")
+```
+
+# Data Exploration & Cleaning
+
+## Renaming Variables
+
+```{r}
+# Rename column names to be in snake_case
+hearing_data <- clean_names(hearing_data)
+cases_charged_data <- clean_names(cases_charged_data)
+case_assignment_data <- clean_names(case_assignment_data)
+bench_warrant_data <- clean_names(bench_warrant_data)
+cases_closed_data <- clean_names(cases_closed_data)
+```
+
+## Cleaning Dates
+
+```{r}
+# Examine variables
+str(hearing_data)
+str(cases_charged_data)
+str(case_assignment_data)
+str(bench_warrant_data)
+str(cases_closed_data)
+
+# Change date variables to become dates
+hearing_data$hearing_date <- as.Date(hearing_data$hearing_date, format = "%m/%d/%Y")
+
+cases_charged_data$offense_date <- as.Date(cases_charged_data$offense_date, format = "%m/%d/%y")
+cases_charged_data$arrest_date <- as.Date(cases_charged_data$offense_date, format = "%m/%d/%y")
+cases_charged_data$received_date <- as.Date(cases_charged_data$received_date, format = "%m/%d/%y")
+cases_charged_data$event_date <- as.Date(cases_charged_data$event_date, format = "%m/%d/%y")
+
+case_assignment_data$division_assignment_time_stamp_created <- as.Date(case_assignment_data$division_assignment_time_stamp_created, format = "%m/%d/%Y")
+case_assignment_data$division_assignment_time_stamp_updated <- as.Date(case_assignment_data$division_assignment_time_stamp_updated, format = "%m/%d/%Y")
+
+bench_warrant_data$event_date <- as.Date(bench_warrant_data$event_date, format = "%m/%d/%Y")
+
+cases_closed_data$offense_date <- as.Date(cases_closed_data$offense_date, format = "%m/%d/%y")
+cases_closed_data$arrest_date <- as.Date(cases_closed_data$arrest_date, format = "%m/%d/%y")
+cases_closed_data$received_date <- as.Date(cases_closed_data$received_date, format = "%m/%d/%y")
+cases_closed_data$event_date <- as.Date(cases_closed_data$event_date, format = "%m/%d/%y")
+
+# Verify cleaning
+str(hearing_data)
+str(cases_charged_data)
+str(case_assignment_data)
+str(bench_warrant_data)
+str(cases_closed_data)
+```
+
+## Filtering for Trial Division
+```{r}
+# Only include cases listed as trial division
+cases_charged_trial_division <- cases_charged_data %>%
+  filter(cases_charged_data$unit == "Trial Division")
+
+cases_closed_trial_division <- cases_closed_data %>%
+  filter(cases_closed_data$unit == "Trial Division")
+
+# Remove original data to tidy up environment
+rm(cases_charged_data)
+rm(cases_closed_data)
+```
+
+## Checking for Duplicates
+```{r}
+# Check for duplicates and view duplicates
+sum(duplicated(hearing_data))
+
+sum(duplicated(cases_charged_trial_division))
+cases_charged_trial_division[duplicated(cases_charged_trial_division), ]
+
+sum(duplicated(case_assignment_data))
+case_assignment_data[duplicated(case_assignment_data), ]
+
+sum(duplicated(bench_warrant_data))
+
+sum(duplicated(cases_closed_trial_division))
+cases_closed_trial_division[duplicated(cases_closed_trial_division), ]
+
+# Remove duplicates
+cases_charged_trial_division <- cases_charged_trial_division[!duplicated(cases_charged_trial_division), ]
+
+case_assignment_data <- case_assignment_data[!duplicated(case_assignment_data), ]
+
+cases_closed_trial_division <- cases_closed_trial_division[!duplicated(cases_closed_trial_division), ]
+
+# Verify cleaning
+sum(duplicated(cases_charged_trial_division))
+sum(duplicated(case_assignment_data))
+sum(duplicated(cases_closed_trial_division))
+```
+
+## Checking for Errors
+```{r}
+# Inspect data
+summary(hearing_data)
+summary(cases_charged_trial_division)
+summary(case_assignment_data)
+summary(bench_warrant_data)
+summary(cases_closed_trial_division)
+
+# Filter for indicted cases
+indicted_cases_trial_division <- cases_charged_trial_division %>%
+  filter(cases_charged_trial_division$event == "Indictment")
+
+# See if cases were indicted before they were received
+indicted_cases_trial_division[indicted_cases_trial_division$event_date < indicted_cases_trial_division$received_date, ]
+
+# See if cases were closed before they were received
+cases_closed_trial_division[cases_closed_trial_division$event_date < cases_closed_trial_division$received_date, ]
+
+# Remove errors
+indicted_cases_trial_division <- indicted_cases_trial_division[indicted_cases_trial_division$event_date >= indicted_cases_trial_division$received_date | is.na(indicted_cases_trial_division$event_date), ]
+
+cases_closed_trial_division <- cases_closed_trial_division[cases_closed_trial_division$event_date >= cases_closed_trial_division$received_date | is.na(cases_closed_trial_division$event_date), ]
+
+# Verify cleaning
+indicted_cases_trial_division[indicted_cases_trial_division$event_date < indicted_cases_trial_division$received_date, ]
+cases_closed_trial_division[cases_closed_trial_division$event_date < cases_closed_trial_division$received_date, ]
+
+# Remove data to tidy up environment
+rm(cases_charged_trial_division)
+```
+
+## Case to Case-Defendant Level
+```{r}
+# Turn indicted cases into case-defendant level (summarize charges)
+indicted_cases_trial_division_defendant_level <- indicted_cases_trial_division %>%
+  group_by(case_number, party_id) %>%
+  summarise(
+    defendant = unique(defendant),
+    indictment_summary = paste(event_date, collapse = "; "), # Summarize indictment dates, separating with semicolons
+    charges_summary = paste(offense, collapse = "; "), # Summarize charges, separating with semicolons
+    charges_code_summary = paste(offense_code, collapse = "; "), # Summarize charge codes, separating with semicolons
+    .groups = "drop"
+  )
+
+# Remove data to tidy up environment
+rm(indicted_cases_trial_division)
+```
+
+```{r}
+# Turn closed cases into case-defendant level (summarize charges)
+cases_closed_trial_division_defendant_level <- cases_closed_trial_division %>%
+  group_by(case_number, party_id) %>%
+  summarise(
+    defendant = unique(defendant),
+    closure_summary = paste(event_date, collapse = "; "), # Summarize closure dates, separating with semicolons
+    charges_summary = paste(offense, collapse = "; "), # Summarize charges, separating with semicolons
+    charges_code_summary = paste(offense_code, collapse = "; "), # Summarize charge codes, separating with semicolons
+    .groups = "drop"
+  )
+
+# Remove data to tidy up environment
+rm(cases_closed_trial_division)
+```
+
+```{r}
+# Turn case assignments into case-defendant level (summarize assignments)
+case_assignment_data_defendant_level <- case_assignment_data %>%
+  mutate(assignment_time = division_assignment_time_stamp_created) %>%
+  group_by(case_number, defendant_name, party_id) %>%
+  slice_max(order_by = assignment_time, n = 1, with_ties = FALSE) %>% # Use most recent assignment time
+  ungroup()
+
+# Remove data to tidy up environment
+rm(case_assignment_data)
+```
+
+```{r}
+# Turn bench warrant data into case-defendant level (summarize bench warrants)
+bench_warrant_data_defendant_level <- bench_warrant_data %>%
+  group_by(case_number, defendant, party_id) %>%
+  summarise(
+    num_bench_warrants = n(),
+    .groups = "drop"
+  )
+
+# Remove data to tidy up environment
+rm(bench_warrant_data)
+```
+
+## Joining Datasets
+
+```{r}
+# Create master dataset
+master_data <- hearing_data %>%
+  left_join(indicted_cases_trial_division_defendant_level, by = c("case_number", "party_id")) %>%
+  left_join(cases_closed_trial_division_defendant_level, by = c("case_number", "party_id")) %>%
+  left_join(case_assignment_data_defendant_level, by = c("case_number", "party_id")) %>%
+  left_join(bench_warrant_data_defendant_level, by = c("case_number", "party_id"))
+```
+
+# Duration from Indictment to Arraignment
+
+## Removing Bench Warrants
+
+```{r}
+# Filter master data to exclude bench warrants
+master_data <- master_data %>%
+  filter(is.na(num_bench_warrants))
+```
+
+## Descriptive Statistics and Distribution of Duration from Indictment to Arraignment
+
+```{r}
+# Create helper function for converting days to years + months
+days_to_years_months <- function(days) {
+  years <- floor(days / 365) # Divide days by 365, rounding down to the nearest whole number
+  months <- floor((days %% 365) / 30) # Convert the remainder to months, again rounding down
+  
+  case_when(
+    years == 0 & months == 0 ~ paste("< 1 mo"), # Less than 1 month
+    years == 0 ~ paste(months, "mo"), # Only months
+    months == 0 ~ paste(years, "yr"), # Only years
+    TRUE ~ paste0(years, "yr ", months, "mo") # Years and months
+  )
+}
+
+# Create helper function for converting days to months
+days_to_months <- function(days) {
+  months <- round(days / 30) # Convert days to months
+  ifelse(months == 1, "1 month", paste0(months, " months")) # Create human-readable text
+}
+```
+
+```{r}
+# Filter master data to exclude data without a creation date
+master_data <- master_data %>%
+  filter(!is.na(division_assignment_time_stamp_created)) %>%
+  filter(division_assignment_time_stamp_created >= as.Date("2022-08-01")) # Make sure the data is post-standing order
+
+# Make sure the data is a proper date object
+master_data$hearing_date <- as.Date(master_data$hearing_date)
+
+# Create variable for number of charges
+master_data$n_charges <- str_count(master_data$charges_summary.x, ";") + 1
+
+# Filter for only arraignment hearings
+master_data_arraignments <- master_data %>%
+  filter(hearing_type == "Arraignment") %>%
+  group_by(case_number, party_id) %>%
+  slice_max(order_by = hearing_date, n = 1, with_ties = FALSE) %>% # Keep only the row with the latest hearing_date
+  ungroup()
+
+# Create variable for EARLIEST indictment
+# Split the strings into pieces
+master_data_arraignments$earliest_indictment <- sapply(strsplit(master_data_arraignments$indictment_summary, ";") # Loop over each row
+                                                       , function(x) {
+  dates <- as.Date(trimws(x), format = "%Y-%m-%d") # Clean and convert to date format
+  if(all(is.na(dates))) return(NA) # Handle rows with no valid dates
+  min(dates, na.rm = TRUE) # Take the earliest date
+})
+
+# Convert back to date
+master_data_arraignments$earliest_indictment <- 
+  as.Date(master_data_arraignments$earliest_indictment, origin = "1970-01-01")
+
+# Calculate duration between indictment and arraignment
+master_data_arraignments$indictment_arraignment_duration <- as.numeric(
+  as.Date(master_data_arraignments$hearing_date) - master_data_arraignments$earliest_indictment
+)
+```
+
+```{r}
+summary(master_data_arraignments$indictment_arraignment_duration)
+```
+
+```{r}
+master_data_arraignments <- master_data_arraignments %>% # Create bins
+  mutate(duration_bin = case_when(
+    indictment_arraignment_duration < 30  ~ "< 1 mo",
+    indictment_arraignment_duration < 90  ~ "1–3 mo",
+    indictment_arraignment_duration < 180 ~ "3–6 mo",
+    indictment_arraignment_duration < 365 ~ "6–12 mo",
+    indictment_arraignment_duration >= 365 ~ "1+ years",
+    TRUE ~ NA_character_ # If nothing above matched, return an NA
+  ))
+
+# Set the order explicitly (otherwise bins will be alphabetized)
+master_data_arraignments$duration_bin <- factor(
+  master_data_arraignments$duration_bin,
+  levels = c("< 1 mo", "1–3 mo", "3–6 mo", "6–12 mo", "1+ years")
+)
+```
+
+```{r}
+# Plot as a categorical histogram/bar chart
+master_data_arraignments %>%
+  filter(!is.na(duration_bin)) %>%
+  
+  ggplot(aes(x = duration_bin)) +
+  geom_bar(fill = "steelblue", color = "white") +
+  
+  labs(
+    x = "Time from Indictment to Arraignment",
+    y = "Number of Cases",
+    title = "Distribution of Indictment to Arraignment Duration",
+    subtitle = "Case-Defendant Level, Trial Division, No Bench Warrants, Post-Standing Order"
+  ) +
+  
+  theme_minimal()
+```
+
+# Number of Charges and Duration from Indictment to Arraignment
+
+```{r}
+# Table
+n_charges_duration_table <- master_data_arraignments %>%
+  group_by(n_charges) %>%
+  summarise(
+    mean_duration = mean(indictment_arraignment_duration, na.rm = TRUE),
+    median_duration = median(indictment_arraignment_duration, na.rm = TRUE),
+    n = n()
+  )
+```
+
+```{r}
+# Combine 20+ charges
+master_data_arraignments %>%
+  mutate(charge_category = case_when(
+    n_charges >= 20 ~ 20, # If a case has 20 or more charges, it is assigned 20
+    TRUE ~ n_charges # Otherwise it keeps the original number of charges
+  )) %>%
+  group_by(charge_category) %>%
+  summarise(
+    n_cases = n(),
+    mean_indictment_arraignment_duration = mean(indictment_arraignment_duration, na.rm = TRUE)
+  ) %>%
+  filter(n_cases >= 10) %>% # Filter for charge counts that are 10 or more
+  
+  # Graphing
+  ggplot(aes(x = charge_category, y = mean_indictment_arraignment_duration)) +
+  geom_line(color = "darkblue") +
+  geom_point() +
+  scale_x_continuous(
+    breaks = c(1:19, 20),
+    labels = c(1:19, "20+")
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, max(master_data_arraignments$indictment_arraignment_duration, na.rm = TRUE), by = 30),
+    labels = days_to_months
+  ) +
+  labs(
+    x = "Number of Charges",
+    y = "Average Duration",
+    title = "Indictment to Arraignment Duration by Number of Charges",
+    subtitle = "Case-Defendant Level, Trial Division, No Bench Warrants, Post-Standing Order"
+  ) +
+  theme_minimal()
+```
+```{r}
+# Boxplot version
+master_data_arraignments %>%
+  filter(!is.na(n_charges), indictment_arraignment_duration >= 0) %>%  # Filter out NAs and negative durations
+  mutate(num_charges_display = ifelse(n_charges >= 11, 11, n_charges)) %>% # Combine 11+ charges
+  group_by(num_charges_display) %>%
+  filter(n() >= 10) %>% # Only include charge counts with 10 or more cases
+  ungroup() %>%
+  
+  ggplot(aes(x = factor(num_charges_display), y = indictment_arraignment_duration)) +
+  geom_boxplot() +
+  scale_x_discrete(labels = c(1:10, "11+")) +
+  scale_y_continuous(
+  breaks = c(
+    0,
+    180,
+    365,
+    545,
+    730,
+    910,
+    1095,
+    1275,
+    1460
+  ),
+  labels = c(
+    "<1 mo",
+    "6 mo",
+    "1 yr",
+    "1 yr 6 mo",
+    "2 yr",
+    "2 yr 6 mo",
+    "3 yr",
+    "3 yr 6 mo",
+    "4 yr"
+  )
+) +
+  labs(x = "Number of Charges",
+       y = "Duration",
+       title = "Indictment to Arraignment Duration by Number of Charges",
+       subtitle = "Case-Defendant Level, Trial Division, No Bench Warrants, Post-Standing Order") +
+  theme_minimal()
+```
+```{r}
+# Remove data to tidy environment
+rm(n_charges_duration_table)
+```
+
+# Visualizing the Relationship Between the Number of Defendants and Indictment-Arraignment Duration
+
+```{r}
+# Create variable for number of defendants
+master_data_arraignments <- master_data_arraignments %>%
+  group_by(case_number) %>%
+  mutate(n_defendants = n()) %>%
+  ungroup()
+```
+
+```{r}
+# Table
+n_defendants_duration_table <- master_data_arraignments %>%
+  group_by(n_defendants) %>%
+  summarise(
+    mean_indictment_araignment_duration = mean(indictment_arraignment_duration, na.rm = TRUE),
+    median_indictment_arraignment_duration = median(indictment_arraignment_duration, na.rm = TRUE),
+    n = n()
+  )
+```
+
+```{r}
+# Combine 20+ defendants
+master_data_arraignments %>%
+  mutate(defendant_category = case_when(
+    n_defendants >= 20 ~ 20, # If a case has 20 or more defendants, it is assigned 20
+    TRUE ~ n_defendants # Otherwise it keeps the original number of defendants
+  )) %>%
+  group_by(defendant_category) %>%
+  summarise(
+    n_cases = n(),
+    mean_indictment_arraignment_duration = mean(indictment_arraignment_duration, na.rm = TRUE)
+  ) %>%
+  # Filter for defendant counts 10 or more
+  filter(n_cases >= 10) %>%
+  
+  # Graphing
+  ggplot(aes(x = defendant_category, y = mean_indictment_arraignment_duration)) +
+  geom_line(color = "darkblue") +
+  geom_point() +
+  scale_x_continuous(
+    breaks = c(1:19, 20),
+    labels = c(1:19, "20+")
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, max(master_data_arraignments$indictment_arraignment_duration, na.rm = TRUE), by = 30),
+    labels = days_to_years_months
+  ) +
+  labs(
+    x = "Number of Defendants",
+    y = "Average Duration",
+    title = "Indictment to Arraignment Duration by Number of Defendants",
+    subtitle = "Case-Defendant Level, Trial Division, No Bench Warrants, Post-Standing Order"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Boxplot version
+master_data_arraignments %>%
+  filter(!is.na(n_defendants), # Exclude NA's
+         indictment_arraignment_duration >= 0) %>% # Exclude negative durations
+  
+  # Collapse 11+ defendants
+  mutate(num_defendants_display = ifelse(n_defendants >= 11, 11, n_defendants)) %>%
+  
+  # Compute group sizes BEFORE filtering anything out
+  group_by(num_defendants_display) %>%
+  mutate(group_n = n()) %>%
+  ungroup() %>%
+  
+  # Keep only groups with at least 10 cases
+  filter(group_n >= 10) %>%
+  
+  ggplot(aes(x = factor(num_defendants_display),
+             y = indictment_arraignment_duration)) +
+  geom_boxplot() +
+  
+  scale_x_discrete(
+    labels = function(x) ifelse(x == "11", "11+", x)
+  ) +
+  
+  scale_y_continuous(
+    breaks = c(0, 180, 365, 545, 730, 910, 1095, 1275, 1460),
+    labels = c("<1 mo", "6 mo", "1 yr", "1 yr 6 mo",
+               "2 yr", "2 yr 6 mo", "3 yr", "3 yr 6 mo", "4 yr")
+  ) +
+  
+  labs(
+    x = "Number of Defendants",
+    y = "Duration",
+    title = "Indictment to Arraignment Duration by Number of Defendants",
+    subtitle = "Case-Defendant Level, Trial Division, No Bench Warrants, Post-Standing Order"
+  ) +
+  
+  theme_minimal()
+```
+
+```{r}
+# Remove data to tidy environment
+rm(n_defendants_duration_table)
+```
+
+# Visualizing Indictment-Arraignment Durations by Division
+
+```{r}
+# Include only Divisions 1-10, filter out NA's, remove negative durations
+master_data_arraignments <- master_data_arraignments %>%
+  filter(!division %in% c("Superior Court", "Superior Pre-File")) %>%
+  filter(!is.na(indictment_arraignment_duration)) %>%
+  filter(indictment_arraignment_duration >= 0)
+
+# Order the Divisions from 1 to 10
+master_data_arraignments$division <- factor(
+  master_data_arraignments$division,
+  levels = unique(
+    master_data_arraignments$division[
+      order(as.numeric(gsub("[^0-9]", "", master_data_arraignments$division)))
+    ]
+  )
+)
+```
+
+```{r}
+# Boxplot graph
+ggplot(master_data_arraignments, 
+       aes(x = division, 
+           y = indictment_arraignment_duration, 
+           fill = division)) +
+
+  geom_boxplot(outlier.shape = 21, outlier.size = 2, outlier.alpha = 0.6) +
+
+  scale_fill_manual(values = c(
+    "cornflowerblue", "cadetblue1", "forestgreen", "yellowgreen", "darkolivegreen",
+    "tan4", "wheat4", "firebrick4","orange", "moccasin"
+  ), guide = "none") +
+
+  scale_y_continuous(
+  breaks = seq(0, 4 * 365, by = 182.5),  # every ~6 months
+  labels = days_to_years_months
+) +
+
+  labs(
+    title = "Indictment to Arraignment Duration by Division",
+    subtitle = "Case-Defendant Level, Trial Division, No Bench Warrants, Post-SO",
+    x     = "Division",
+    y     = "Indictment to Arraignment Duration"
+  ) +
+
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, color = "grey50"),
+    legend.position = "bottom",
+    panel.grid.major.x = element_blank(),
+    axis.text.x        = element_text(angle = 30, hjust = 1, size = 9)
+  )
+```
+
+```{r}
+# Basic ANOVA test
+anova_model_indictment_arraignment <- aov(indictment_arraignment_duration ~ as.factor(division), 
+                   data = master_data_arraignments)
+
+# View ANOVA results
+summary(anova_model_indictment_arraignment)
+```
+
+```{r}
+# Post-hoc testing (Tukey's Honest Significant Difference test)
+tukey_results_indictment_arraignment <- TukeyHSD(anova_model_indictment_arraignment)
+print(tukey_results_indictment_arraignment)
+
+# Extract results
+tukey_df_indictment_arraignment <- as.data.frame(tukey_results_indictment_arraignment$`as.factor(division)`)
+
+# Filter for significant differences
+significant_pairs_indictment_arraignment <- tukey_df_indictment_arraignment %>%
+  filter(`p adj` < 0.05) %>%
+  arrange(`p adj`)
+
+print(significant_pairs_indictment_arraignment)
+```
+```{r}
+# Remove data to tidy environment
+rm(anova_model_indictment_arraignment)
+rm(significant_pairs_indictment_arraignment)
+rm(tukey_df_indictment_arraignment)
+rm(tukey_results_indictment_arraignment)
+```
+
+# Time Between Hearings
+
+```{r}
+# Filter out bond hearings and convert hearing_date to date variable
+master_data <- master_data %>%
+  filter(!hearing_type %in% c("Bond Hearings", "Bond Reduction Hearing")) %>%
+  mutate(hearing_date = as.Date(hearing_date))
+
+# Select the EARLIEST arraignment
+earliest_arraignments <- master_data %>%
+  filter(hearing_type == "Arraignment") %>%
+  group_by(case_number, party_id) %>%
+  slice_min(order_by = hearing_date, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+# Find the next hearing after arraignment
+arraignment_to_next <- earliest_arraignments %>%
+  left_join(
+    master_data,
+    by = c("case_number", "defendant.x", "party_id"),
+    suffix = c("_arraignment", "_next")
+  ) %>%
+  filter(hearing_date_next > hearing_date_arraignment) %>% # Keep only hearings AFTER arraignment
+  group_by(case_number, party_id) %>% # Pick the NEXT immediate hearing
+  slice_min(order_by = hearing_date_next, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  # Compute time difference
+  mutate(
+    days_to_next_hearing = as.numeric(
+      hearing_date_next - hearing_date_arraignment
+    )
+  )
+```
+
+```{r}
+# Find the mean and median
+summary(arraignment_to_next$days_to_next_hearing)
+```
+
+```{r}
+# Join dataset with division numbers and filter out bench warrants
+arraignment_to_next_divisions_no_bench_warrants <- arraignment_to_next %>%
+  left_join(bench_warrant_data_defendant_level, by = c("case_number", "party_id")) %>%
+  left_join(case_assignment_data_defendant_level, by = c("case_number", "party_id")) %>%
+  filter(is.na(num_bench_warrants))
+```
+
+```{r}
+# Filter for only Divisions 1-10, exclude NA's and negative durations
+arraignment_to_next_divisions_no_bench_warrants <- 
+  arraignment_to_next_divisions_no_bench_warrants %>%
+  filter(!division %in% c("Superior Court", "Superior Pre-File")) %>%
+  filter(!is.na(days_to_next_hearing)) %>%
+  filter(days_to_next_hearing >= 0)
+
+# Factor the division variable to properly sort from 1-10
+arraignment_to_next_divisions_no_bench_warrants$division <- factor(
+  arraignment_to_next_divisions_no_bench_warrants$division,
+  levels = unique(
+    arraignment_to_next_divisions_no_bench_warrants$division[
+      order(as.numeric(gsub("[^0-9]", "", 
+            arraignment_to_next_divisions_no_bench_warrants$division)))
+    ]
+  )
+)
+```
+
+```{r}
+# Boxplot
+ggplot(arraignment_to_next_divisions_no_bench_warrants, 
+       aes(x = division, 
+           y = days_to_next_hearing, 
+           fill = division)) +
+
+  geom_boxplot(outlier.shape = 21, outlier.size = 2, outlier.alpha = 0.6) +
+
+  scale_fill_manual(values = c(
+    "cornflowerblue", "cadetblue1", "forestgreen", "yellowgreen", "darkolivegreen",
+    "tan4", "wheat4", "firebrick4","orange", "moccasin"
+  ), guide = "none") +
+
+  scale_y_continuous(
+    breaks = seq(0, 3 * 365, by = 182.5),
+    labels = days_to_years_months
+  ) +
+
+  labs(
+    title = "Arraignment to Subsequent Hearing Duration by Division",
+    subtitle = "Case-Defendant Level, Trial Division, No Bench Warrants, Post-SO",
+    x = "Division",
+    y = "Days from Arraignment to Subsequent Hearing"
+  ) +
+
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, color = "grey50"),
+    legend.position = "bottom",
+    panel.grid.major.x = element_blank(),
+    axis.text.x        = element_text(angle = 30, hjust = 1, size = 9)
+  )
+```
+
+```{r}
+# Basic ANOVA test
+anova_model_arraignment_next_hearing <- aov(days_to_next_hearing ~ as.factor(division), 
+                   data = arraignment_to_next_divisions_no_bench_warrants)
+
+# View ANOVA results
+summary(anova_model_arraignment_next_hearing)
+```
+
+```{r}
+# Post-hoc testing (Tukey's Honest Significant Difference test)
+tukey_results_arraignment_next_hearing <- TukeyHSD(anova_model_arraignment_next_hearing)
+print(tukey_results_arraignment_next_hearing)
+
+# Extract results
+tukey_df_arraignment_next_hearing <- as.data.frame(tukey_results_arraignment_next_hearing$`as.factor(division)`)
+
+# Filter for significant differences
+significant_pairs_arraignment_next_hearing <- tukey_df_arraignment_next_hearing %>%
+  filter(`p adj` < 0.05) %>%
+  arrange(`p adj`)
+
+print(significant_pairs_arraignment_next_hearing)
+```
+```{r}
+# Remove data to tidy environment
+rm(anova_model_arraignment_next_hearing)
+rm(arraignment_to_next)
+rm(arraignment_to_next_divisions_no_bench_warrants)
+rm(earliest_arraignments)
+rm(significant_pairs_arraignment_next_hearing)
+rm(tukey_df_arraignment_next_hearing)
+rm(tukey_results_arraignment_next_hearing)
+```
+
+# Case Closure Times
+
+```{r}
+# Split the closure summary into individual closure dates
+master_data <- master_data %>%
+  mutate(
+    latest_closure_date = str_split(closure_summary, ";\\s*") %>% # Split into pieces at semicolons
+      map(~ as.Date(.x, format = "%Y-%m-%d")) %>% # Convert strings to Date objects
+      # Handle missing/empty lists
+      map(~ {
+        if (all(is.na(.x)) || length(.x) == 0) {
+          return(NA)
+        }
+        max(.x, na.rm = TRUE)
+      }) %>%
+      # Convert into clean Date
+      map_chr(~ as.character(.x)) %>%
+      as.Date()
+  )
+
+# Calculate duration from assignment to latest closure
+master_data <- master_data %>%
+  mutate(
+    assignment_to_closure_duration = as.numeric(difftime(latest_closure_date, 
+                                                          assignment_time, 
+                                                          units = "days"))
+  )
+
+# Check the results
+master_data %>%
+  select(closure_summary, latest_closure_date, assignment_time, assignment_to_closure_duration) %>%
+  head(10)
+```
+
+```{r}
+# How many NAs and negatives?
+master_data %>%
+  summarise(
+    total_cases = n(),
+    na_closure_summary = sum(is.na(closure_summary)),
+    na_latest_closure = sum(is.na(latest_closure_date)),
+    na_assignment = sum(is.na(assignment_time)),
+    negative_duration = sum(assignment_to_closure_duration < 0, na.rm = TRUE),
+    positive_duration = sum(assignment_to_closure_duration >= 0, na.rm = TRUE)
+  )
+
+# Look at some examples of negative durations
+master_data %>%
+  filter(assignment_to_closure_duration < 0) %>%
+  select(assignment_time, closure_summary, latest_closure_date, assignment_to_closure_duration) %>%
+  head(20)
+
+# Look at some NAs
+master_data %>%
+  filter(is.na(assignment_to_closure_duration)) %>%
+  select(assignment_time, closure_summary, latest_closure_date, assignment_to_closure_duration) %>%
+  head(20)
+```
+
+```{r}
+# Only keep cases where assignment came before closure
+master_data <- master_data %>%
+  filter(!is.na(assignment_time), 
+         !is.na(latest_closure_date),
+         assignment_to_closure_duration >= 0)
+
+# Check how many cases remain
+nrow(master_data)
+
+# Descriptive statistics
+summary(master_data$assignment_to_closure_duration)
+```
+
+# Case Closure Times by Division
+```{r}
+# Include only Divisions 1-10, filter for CR cases, remove NA's and negative durations
+master_data <- master_data %>%
+  filter(!division %in% c("Superior Court", "Superior Pre-File")) %>%
+  filter(grepl("CR", case_number, ignore.case = TRUE)) %>%
+  filter(!is.na(assignment_to_closure_duration)) %>%
+  filter(assignment_to_closure_duration >= 0)
+
+# Order the Divisions from 1 to 10
+master_data$division <- factor(
+  master_data$division,
+  levels = unique(
+    master_data$division[
+      order(as.numeric(gsub("[^0-9]", "", master_data$division)))
+    ]
+  )
+)
+```
+
+
+```{r}
+# Boxplot graph
+ggplot(master_data, 
+       aes(x = division, 
+           y = assignment_to_closure_duration, 
+           fill = division)) +
+
+  geom_boxplot(outlier.shape = 21, outlier.size = 2, outlier.alpha = 0.6) +
+
+  scale_fill_manual(values = c(
+    "cornflowerblue", "cadetblue1", "forestgreen", "yellowgreen", "darkolivegreen",
+    "tan4", "wheat4", "firebrick4","orange", "moccasin"
+  ), guide = "none") +
+
+  scale_y_continuous(
+  breaks = seq(0, 3 * 365, by = 182.5),  # every ~6 months
+  labels = days_to_years_months
+) +
+
+  labs(
+    title = "Assignment to Closure Duration by Division",
+    subtitle = "Case-Defendant Level, Trial Division CR Cases, No Bench Warrants, Post-SO",
+    x     = "Division",
+    y     = "Assignment to Closure Duration"
+  ) +
+
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, color = "grey50"),
+    legend.position = "bottom",
+    panel.grid.major.x = element_blank(),
+    axis.text.x        = element_text(angle = 30, hjust = 1, size = 9)
+  )
+```
+
+```{r}
+# Basic ANOVA test
+anova_model_assignment_closure <- aov(assignment_to_closure_duration ~ as.factor(division), 
+                   data = master_data)
+
+# View ANOVA results
+summary(anova_model_assignment_closure)
+```
+
+```{r}
+# Post-hoc testing (Tukey's Honest Significant Difference test)
+tukey_results_assignment_closure <- TukeyHSD(anova_model_assignment_closure)
+print(tukey_results_assignment_closure)
+
+# Extract results
+tukey_df_assignment_closure <- as.data.frame(tukey_results_assignment_closure$`as.factor(division)`)
+
+# Filter for significant differences
+significant_pairs_assignment_closure <- tukey_df_assignment_closure %>%
+  filter(`p adj` < 0.05) %>%
+  arrange(`p adj`)
+
+print(significant_pairs_assignment_closure)
+```
+
+```{r}
+# Remove data to tidy environment
+rm(anova_model_assignment_closure)
+rm(significant_pairs_assignment_closure)
+rm(tukey_df_assignment_closure)
+rm(tukey_results_assignment_closure)
+```
+
+# Hearings Until Case Closure
+
+```{r}
+# Count non-bond hearings per case (CR cases only)
+hearings_per_case <- master_data %>%
+  filter(!hearing_type %in% c("Bond Hearing", "Bond Reduction Hearing")) %>%
+  filter(grepl("CR", case_number, ignore.case = TRUE)) %>%  # Only CR cases
+  group_by(case_number) %>%
+  summarise(
+    n_hearings = n(),
+    hearing_types = paste(unique(hearing_type), collapse = "; ")
+  )
+
+# Summary statistics
+summary(hearings_per_case$n_hearings)
+table(hearings_per_case$n_hearings)
+```
+
+```{r}
+# Create a binned version of n_hearings
+hearings_per_case_binned <- hearings_per_case %>%
+  mutate(
+    n_hearings_binned = ifelse(n_hearings >= 20, "20+", as.character(n_hearings)),
+    n_hearings_binned = factor(n_hearings_binned, 
+                               levels = c(as.character(1:19), "20+"))
+  )
+
+# Histogram with 20+ combined
+ggplot(hearings_per_case_binned, aes(x = n_hearings_binned)) +
+  geom_bar(fill = "darkblue", alpha = 0.7) +
+  labs(
+    title = "Distribution of Hearings Among Closed CR Cases",
+    subtitle = "Case Level, Trial Division, Post-Standing Order, Excludes Bond Hearings",
+    x = "Number of Hearings",
+    y = "Number of Cases"
+  ) +
+  theme_minimal()
+```
+
+# Hearing Until Case Closure by Division
+```{r}
+# Calculate median hearings per case for each division
+hearings_by_division <- master_data %>%
+  # Filter out bond hearings
+  filter(!hearing_type %in% c("Bond Hearing", "Bond Reduction Hearing")) %>%
+  # Filter for CR cases
+  filter(grepl("CR", case_number, ignore.case = TRUE)) %>%
+  # Count hearings per case
+  group_by(case_number, division) %>%
+  summarise(n_hearings = n(), .groups = "drop") %>%
+  # Remove NA divisions and fake divisions
+  filter(!is.na(division),
+         !division %in% c("Superior Pre-File", "Superior Court")) %>%
+  # Calculate median by division
+  group_by(division) %>%
+  summarise(
+    n_cases = n(),
+    median_hearings = median(n_hearings, na.rm = TRUE)
+  ) %>%
+  # Order divisions 1-10 (with "Division " prefix)
+  mutate(division = factor(division, 
+                          levels = paste("Division", 1:10))) %>%
+  arrange(division)
+
+# View the results
+print(hearings_by_division)
+```
+
+```{r}
+ggplot(hearings_by_division, aes(x = division, y = median_hearings)) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "Median Hearings Among Closed CR Cases by Division",
+    subtitle = "Case Level, Trial Division, Post-Standing Order, Excludes Bond Hearings",
+    x = "Division",
+    y = "Median Number of Hearings"
+  ) +
+  scale_y_continuous(breaks = c(0, 1, 2)) +
+  theme_minimal()
+```
+
+```{r}
+# Remove data to tidy environment
+rm(hearings_by_division)
+rm(hearings_per_case)
+rm(hearings_per_case_binned)
+```

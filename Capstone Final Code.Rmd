@@ -1,0 +1,1018 @@
+---
+title: "Capstone Final Code"
+author: "Miriam Brem"
+date: "2026-04-24"
+output: html_document
+---
+
+# Preliminary Loading 
+```{r load packages}
+# install.packages("openxlsx", dependencies = TRUE) # Noted here because I did not have it downloaded, so for people reviewing code
+library(openxlsx) #Fixes Excel Arrest Date Upload error 
+library(readxl) #Loads excel packages onto R
+library(tidyverse) #Loads tools like %>%
+library(ggplot2) #Loads tool for creating visualizations 
+library(readxl) # Loads and combines sentencing data 
+library(purrr)  # Loads and combines sentencing data 
+```
+
+# Incoming/Outgoing Cases 
+
+
+## Preparing the Datasets for Analysis 
+I was having major issues with my computer memory, so I had to do a lot of filtering and steps in a somewhat illogical order to get the d and cr numbers datasets to merge. First, I am going to load the datasets and select the bare minimum of columns. 
+```{r load new data}
+# select columns to make the datasets smaller 
+cr_data <- read.csv("Data/case_data_cr.csv") %>% 
+  select(Party.ID, Case.Number, Received.Date, Unit, Case.Status)
+d_data <- read.csv("Data/case_data_d.csv") %>% 
+  rename(Party.ID = Praty.ID) %>%  # Fix column name typo
+  select(Party.ID, Case.Number, Received.Date, Unit, Case.Status)
+cases_closed_data <- read.csv("Data/Cases Closed Data.csv") %>% 
+  select(Party.ID, Event.Date)
+```
+Now I want to merge the first two data sets and then take the data to the case-defendant level
+```{r merge cr and d data and go to case defendant level}
+date_formats <- c("mdy", "ymd", "dmy", "mdy HM", "ymd HM") # make a list of all of the potential date formats 
+
+# Not enough memory to do the merge right away, so go to case defendant level first
+question12_df <- bind_rows(d_data, cr_data)  %>% # Merge the cr and d data 
+  # create opening year variable 
+  mutate(Received.Date = parse_date_time(Received.Date, orders = date_formats)) %>%
+  mutate(Case.Opening.Year = year(Received.Date)) %>%  # Uses Received date for opening year 
+  # Go to Case-Defendant level  
+  group_by(Case.Number, Case.Opening.Year) %>% 
+    slice(1) %>% 
+  ungroup() %>% 
+  # Filter out a few more units/times
+  filter(Unit != "HIDTA") %>% 
+  filter(Unit != "SB440") %>%
+  filter(Unit != "No Unit Entered") %>%
+  filter(Case.Opening.Year >= 2019) # not before 2018
+```
+
+Now the data set should be small enough to merge the datasets with my computer memory capacity. So now I am going to merge the cr/d data with the case closed data to get the event date information.
+```{r merge cases closed data}
+# Now there should be enough memory for the 
+question12_df<- left_join(question12_df, cases_closed_data, by = "Party.ID", relationship = "many-to-many") # add the event date where applicable 
+```
+Now I need to standardize the event date column and create the Case.Closing.Year variable. 
+
+```{r standardize dates}
+question12_df  <- question12_df %>% # Parse dates 
+  mutate(Event.Date = parse_date_time(Event.Date, orders = date_formats))
+
+question12_df <- question12_df %>% # create closing year 
+    mutate(`Case.Closing.Year` = year(`Event.Date`))  %>% # Uses the year that Event/resolution occurred
+    filter(Case.Closing.Year >= 2019) %>%
+    mutate(`Unit.Type` = if_else(Unit == "Trial Division", "Trial Division", "Specialty Unit")) 
+```
+
+Now I am done preparing the data and I can create my visualizations:
+
+```{r two line visualization}
+vis_data <- question12_df  %>% # Filter the data a bit 
+  filter(!(Event.Date >= as.Date("2024-07-01"))) %>% # not outgoing after 4/25
+  filter(!(Received.Date >= as.Date("2024-07-01"))) # not incoming after 4/25
+
+incoming <- vis_data  %>%  
+  filter(!is.na(Received.Date)) %>%
+  mutate(Period = floor_date(Received.Date, unit = "6 months")) %>%
+  group_by(Period) %>%  
+  summarise(Count = n(), .groups = "drop") %>%
+  mutate(Line = "Incoming")
+
+outgoing <- vis_data %>%
+  filter(!is.na(Event.Date)) %>%
+  mutate(Period = floor_date(Event.Date, unit = "6 months")) %>%
+  group_by(Period) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  mutate(Line = "Outgoing")
+
+vis_plot_data <- bind_rows(incoming, outgoing)
+class(vis_plot_data$Period)
+
+vis_plot_data$Period <- as.Date(
+vis_plot_data$Period, format = "%Y-%m-%d")
+# Plot
+ggplot(vis_plot_data, aes(x = Period, y = Count, color = Line, group = Line)) +
+  geom_line() +
+  geom_point() +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b %Y") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1)) +
+  labs(
+    title = "Case-Defendant Level Incoming vs Outgoing Cases Over Time by Unit Type",
+    x = "Time Period",
+    y = "Number of Cases",
+    color = "Case Type"
+  ) +
+  scale_color_manual(values = c(
+    "Incoming"= "navy",
+    "Outgoing"  = "tan4")) +
+  # Add lines for Covid
+  geom_vline(xintercept = as.Date("2020-03-13"), color = "red", linetype = "dashed") +
+  annotate("text", x = as.Date("2020-03-13"), y = max(vis_plot_data$Count) * 0.93,
+           label = "COVID Shutdown", color = "red", angle = 90, vjust = -1, size = 2) +
+  geom_vline(xintercept = as.Date("2021-06-21"), color = "red", linetype = "dashed") +
+  annotate("text", x = as.Date("2021-06-21"), y = max(vis_plot_data$Count) * 0.95,
+           label = "Full Reopening", color = "red", angle = 90, vjust = 2, size = 2) +
+  geom_vline(xintercept = as.Date("2021-04-03"), color = "orange", linetype = "dashed") +
+  annotate("text", x = as.Date("2021-04-03"), y = max(vis_plot_data$Count) * 0.92,
+           label = "Grand Jury Resumes", color = "orange", angle = 90, vjust = -1, size = 2)
+
+rm(vis_plot_data, incoming, outgoing)
+```
+
+Now, to get a better idea of the differences between Trial Division and the other Specialty Units (except for HIDTA and SB440), I decided to create the same visualization but separated by the unit type. 
+
+```{r three line incoming and outgoing visualization}
+incoming <- vis_data  %>%  
+  filter(!is.na(Received.Date)) %>%
+  mutate(Period = floor_date(Received.Date, unit = "6 months")) %>%
+  group_by(Period) %>%  
+  summarise(Count = n(), .groups = "drop") %>%
+  mutate(Line = "Incoming (All Units)")
+
+outgoing <- vis_data %>%
+  filter(!is.na(Event.Date)) %>%
+  mutate(Period = floor_date(Event.Date, unit = "6 months")) %>%
+  group_by(Period, Unit.Type) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  mutate(Line = paste(Unit.Type, "Outgoing", sep = " - "))
+
+vis_plot_data <- bind_rows(incoming, outgoing)
+
+vis_plot_data$Period <- as.Date(
+vis_plot_data$Period, format = "%Y-%m-%d")
+# Plot
+ggplot(vis_plot_data, aes(x = Period, y = Count, color = Line, group = Line)) +
+  geom_line() +
+  geom_point() +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b %Y") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1)) +
+  labs(
+    title = "Case-Defendant Level Incoming vs Outgoing Cases Over Time by Unit Type",
+    x = "Time Period",
+    y = "Number of Cases",
+    color = "Case Type"
+  ) +
+  scale_color_manual(values = c(
+    "Incoming (All Units)"       = "navy",
+    "Trial Division - Outgoing"  = "tan4",
+    "Specialty Unit - Outgoing"  = "tan3")) +
+  # Add lines for Covid
+  geom_vline(xintercept = as.Date("2020-03-13"), color = "red", linetype = "dashed") +
+  annotate("text", x = as.Date("2020-03-13"), y = max(vis_plot_data$Count) * 0.93,
+           label = "COVID Shutdown", color = "red", angle = 90, vjust = -1, size = 2) +
+  geom_vline(xintercept = as.Date("2021-06-21"), color = "red", linetype = "dashed") +
+  annotate("text", x = as.Date("2021-06-21"), y = max(vis_plot_data$Count) * 0.95,
+           label = "Full Reopening", color = "red", angle = 90, vjust = 2, size = 2) +
+  geom_vline(xintercept = as.Date("2021-04-03"), color = "orange", linetype = "dashed") +
+  annotate("text", x = as.Date("2021-04-03"), y = max(vis_plot_data$Count) * 0.92,
+           label = "Grand Jury Resumes", color = "orange", angle = 90, vjust = -1, size = 2)
+
+rm(vis_plot_data, incoming, outgoing)
+```
+
+```{r four line incoming and outgoing visualization}
+incoming <- vis_data  %>%  
+  filter(!is.na(Received.Date)) %>%
+  mutate(Period = floor_date(Received.Date, unit = "6 months")) %>%
+  group_by(Period, Unit.Type) %>%  
+  summarise(Count = n(), .groups = "drop") %>%
+  mutate(Line = paste(Unit.Type, "Incoming", sep = " - "))
+
+outgoing <- vis_data %>%
+  filter(!is.na(Event.Date)) %>%
+  mutate(Period = floor_date(Event.Date, unit = "6 months")) %>%
+  group_by(Period, Unit.Type) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  mutate(Line = paste(Unit.Type, "Outgoing", sep = " - "))
+
+vis_plot_data <- bind_rows(incoming, outgoing) %>%
+  mutate(Line = factor(Line, levels = c(
+    "Trial Division - Outgoing", "Specialty Unit - Outgoing", "Trial Division - Incoming", "Specialty Unit - Incoming")))
+
+vis_plot_data$Period <- as.Date(
+vis_plot_data$Period, format = "%Y-%m-%d")
+# Plot
+ggplot(vis_plot_data, aes(x = Period, y = Count, color = Line, group = Line)) +
+  geom_line() +
+  geom_point() +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b %Y") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1)) +
+  labs(
+    title = "Case-Defendant Level Incoming vs Outgoing Cases Over Time by Unit Type",
+    x = "Time Period",
+    y = "Number of Cases",
+    color = "Case Type"
+  ) +
+  scale_color_manual(values = c(
+    "Trial Division - Incoming" = "navy",
+    "Specialty Unit - Incoming" = "royalblue",
+    "Trial Division - Outgoing"  = "tan4",
+    "Specialty Unit - Outgoing"  = "tan3")) +
+  # Add lines for Covid
+  geom_vline(xintercept = as.Date("2020-03-13"), color = "red", linetype = "dashed") +
+  annotate("text", x = as.Date("2020-03-13"), y = max(vis_plot_data$Count) * 0.93,
+           label = "COVID Shutdown", color = "red", angle = 90, vjust = -1, size = 2) +
+  geom_vline(xintercept = as.Date("2021-06-21"), color = "red", linetype = "dashed") +
+  annotate("text", x = as.Date("2021-06-21"), y = max(vis_plot_data$Count) * 0.95,
+           label = "Full Reopening", color = "red", angle = 90, vjust = 2, size = 2) +
+  geom_vline(xintercept = as.Date("2021-04-03"), color = "orange", linetype = "dashed") +
+  annotate("text", x = as.Date("2021-04-03"), y = max(vis_plot_data$Count) * 0.92,
+           label = "Grand Jury Resumes", color = "orange", angle = 90, vjust = -1, size = 2)
+
+#rm(vis_plot_data, incoming, outgoing)
+```
+
+
+
+
+------------------------------------------------------------------------------
+
+
+# Case Outcomes 
+
+
+## Preparing the Datasets for Analysis 
+First, we are going to load the data sets. We are going to combine the `cases closed data` and the `sentencing data`. 
+
+**VIEWER NOTE: This uses an excel sheet for Sentencing Data instead of a CSV, so download accordingly. Put it in a folder and download from there. Also expect this to take a while to load.**
+```{r prepare q13 data for analysis}
+cases_closed_data <- read.csv("Data/Cases Closed Data.csv") 
+
+# Used for Sentencing Information
+files_path <- "/Users/karizhou/Desktop/SPRING 26/Capstone/Data/Sentencing Data" # File path - this changes depending on computer
+# Used as a Marker for Trials
+trial_data <- read.csv("Data/Trial Data.csv")
+
+# get all of the xlsx files
+xlsx_files <- list.files(path = files_path,
+                        pattern = "\\.xlsx$",
+                        full.names = TRUE)
+xlsx_files <- xlsx_files[!grepl("/~\\$", xlsx_files)] # Remove Excel temporary files (~$) - this will not work if you have any of the files open
+sentencing_data <- map_dfr(xlsx_files, read_excel) # Combine all of the files into one df 
+
+# Clean the data to remove repeated rows 
+sentencing_data <- sentencing_data %>% 
+  distinct(`Party ID`, `ChargeID`, .keep_all = TRUE) # Keep one row for each distinct Party ID/Charge ID combo 
+
+sentencing_data_cleaning_subset <- sentencing_data[,c("CaseNbr", "Plea", "Disposition", "Disposition Date")] # Only pick certain rows
+
+question13_df <- cases_closed_data %>%
+  left_join(sentencing_data_cleaning_subset, by = c("Case.Number"= "CaseNbr"), relationship = "many-to-many") %>%  # They do not match up because cases-close has more information then sentencing (not all cases receive a sentence) so this will add NULL for sententencing where they do not overlap 
+  mutate(Trial = Case.Number %in% trial_data$Case.Number) %>% 
+  mutate(year = year(`Disposition Date`))   # Create a year column
+
+rm(sentencing_data_cleaning_subset) # Remove unneeded df
+#Utilized AI for this block of code. See AI Use Statement Q11 1 at the end.
+```
+
+### Analyzing the Data 
+This question asks me for the annual conviction rate of cases. The conviction rate shows how many trials result in a conviction. It is calculated using this formula: 
+
+**Conviction Rate** = Total Number of Convictions/ Total Number of Trials
+
+So, I want to create a function to calculate this for a given dataset.
+```{r creating a function to calculate conviction rate}
+# Create a list of all dispositions that count as convictions 
+  conviction_list <- c("Bench Verdict Guilty (Convicted/Adjudicated)", "First Offender Act - Pending", "First Offender Act Completed", "Guilty", "Jury Verdict Guilty (Convicted/Adjudicated)","First Offender Act Revoked", "First Offender Act Tolled", "First Offender Act Unsatisfactory", "Nolo") 
+  
+calculate_conviction_df <- function(df) {
+  # Find the total number of convictions per year 
+  conviction <- df %>% 
+    filter(`Disposition` %in% conviction_list) %>% # Filter for only convictions 
+    group_by(`Party.ID`, year) %>% 
+     slice(1) %>% # Only keep first entry from each defendant group
+    ungroup() %>%
+    group_by(year) %>% 
+    summarize(total_conviction_count = n()) # Count the number of convictions per year 
+  
+  # Find the total number of trials per year 
+  trial <- df %>% 
+    filter(Trial == TRUE) %>% # Filter for only trials 
+    group_by(`Party.ID`, year) %>% 
+      slice(1) %>% # Only keep first entry from each defendant group 
+    ungroup() %>%
+    group_by(year) %>% 
+    summarize(total_trial_count = n()) # Count the number of trial per year 
+  
+  # Find the conviction rate per year 
+    conviction_rate <- full_join(conviction, trial, by = "year") %>% # Combine conviction and trial dfs 
+    mutate(conviction_rate = total_conviction_count / total_trial_count) %>% # calculate conviction rate
+    select(year, conviction_rate) %>% # clean up final df 
+    filter(year >= 2018) %>% 
+    arrange(desc(year))
+  
+  return(conviction_rate)}
+```
+
+Note: The exact list of dispositions that shall be counted as convictions were not listed in the same format, so some analysis choices were made regarding what counts as a conviction. 
+
+```{r investigating the number of guilty pleas that do not go to trial}
+acquittals_list <- c("Jury Verdict Not Guilty", "Bench Verdict Not Guilty (Convicted/Adjudicated)", "Not Guilty by Reason of Insanity - Restrict", "Not Guilty", "Not Guilty - Restrict", "Jury Verdict Not Guitly by Reason of Insanity")
+
+
+# Use very similar code as above. 
+results_list <- list() # Create list for results 
+unit_list <- c("Trial Division", "Specialty Unit")
+
+plot_vis <- question13_df %>% # Create a column with if it belongs to the Trial Division or not 
+  filter(Unit != "No Unit Entered") %>% 
+  mutate(`Unit.Type` = if_else(Unit == "Trial Division", "Trial Division", "Specialty Unit")) %>% 
+  mutate(win = if_else(Disposition %in% conviction_list, "Convicted", "Not Convicted")) %>% 
+  mutate(win = case_when(Disposition %in% conviction_list ~ "Convicted", 
+                         Disposition %in% acquittals_list ~ "Acquitted" , 
+                         TRUE ~ "Dismissed"))  %>%
+  group_by(`Party.ID`, year) %>%  # Make into Case-Defendant level 
+    arrange(desc(Disposition %in% conviction_list)) %>% # Put convictions at the top of the list - Includes Pleas 
+    slice(1) %>% # Only keep first entry from each defendant group
+    ungroup()
+plot_vis$win <- factor(plot_vis$win, levels = c("Convicted", "Dismissed","Acquitted"))
+
+# Create a loop for each division
+for(i in 1:length(unit_list)) { # Run one time for each division. So 2 times 
+  current_unit <- unit_list[i] # Keep track of which division we're on 
+
+  # Find and store the count of cases 
+  unit_results <- plot_vis %>% 
+    filter(`Unit.Type` == current_unit) %>%
+    group_by(year, win) %>% # Separate by year and if it was a win 
+    summarise(case_count = n()) %>% 
+    ungroup() %>% 
+    mutate(unit = current_unit)
+  
+  results_list[[i]] <- unit_results # Store the conviction rate df
+}
+results <- bind_rows(results_list) # Combine all of the df into one by year
+results$win <- factor(results$win, levels = c("Acquitted", "Dismissed", "Convicted"))
+
+# Create visualization
+ggplot(results, aes(x = year, y = case_count, fill = win, group = unit)) + 
+  geom_col(position = "stack") +
+  facet_wrap(~ unit) +
+  theme_minimal() +
+  labs(title = 'Case Defendant-Level Case Counts for Trial Division vs. Other Units',
+      x = "Year", y = "Case Count", fill = "Case Outcome") + 
+  scale_x_continuous(breaks = seq(2019, 2025, by = 1)) + # Make sure the x-axis shows every year 
+  scale_fill_manual(values = c(
+    "Convicted"     = "darkblue",
+    "Acquitted" = "black", 
+    "Dismissed" = "slategrey")) +
+  # Add lines for Covid 
+  geom_vline(xintercept = 2020, color = "red", linetype = "dashed") + 
+  annotate("text", x = 2020, y = 2100, label = "COVID Shutdown", color = "red", angle = 90, vjust = -1, size = 2) +
+  geom_vline(xintercept = 2021, color = "red", linetype = "dashed") + 
+  annotate("text", x = 2021, y = 2121, label = "Full Reopening", color = "red", angle = 90, vjust = -1, size = 2)
+
+rm(results, unit_list, unit_results, results_list) # Remove dfs that will not be reused
+```
+
+To replace the conviction rate and represent how many cases actually go to trial, here is a similar visualization but only with the cases that went to trial. 
+```{r Defendant-Level Trial Conviction Counts of Trial Division vs. Other Units}
+# Use very similar code as above. 
+results_list <- list() # Create list for results 
+unit_list <- c("Trial Division", "Specialty Unit")
+
+plot_vis <- question13_df %>% # Create a column with if it belongs to the Trial Division or not 
+  filter(Unit != "No Unit Entered") %>% 
+  mutate(`Unit.Type` = if_else(Unit == "Trial Division", "Trial Division", "Specialty Unit")) %>% 
+  mutate(win = case_when(Disposition %in% conviction_list ~ "Convicted", 
+                         Disposition %in% acquittals_list ~ "Acquitted" , 
+                         TRUE ~ "Dismissed"))  %>%
+  filter(Trial == TRUE) %>% 
+  group_by(`Party.ID`, year) %>%  # Make into Case-Defendant level 
+    arrange(desc(Disposition %in% conviction_list)) %>% # Put convictions at the top of the list - Includes Pleas 
+    slice(1) %>% # Only keep first entry from each defendant group
+    ungroup()
+
+plot_vis$win <- factor(plot_vis$win, levels = c("Convicted", "Dismissed","Acquitted"))
+
+
+# Create a loop for each division
+for(i in 1:length(unit_list)) { # Run one time for each division. So 2 times 
+  current_unit <- unit_list[i] # Keep track of which division we're on 
+
+  # Find and store the count of cases 
+  unit_results <- plot_vis %>% 
+    filter(Unit.Type == current_unit) %>%
+    group_by(year, win) %>% # Separate by year and if it was a win 
+    summarise(case_count = n()) %>% 
+    ungroup() %>% 
+    mutate(unit = current_unit)
+  
+  results_list[[i]] <- unit_results # Store the conviction rate df
+}
+results <- bind_rows(results_list) # Combine all of the df into one by year
+results$win <- factor(results$win, levels = c("Acquitted", "Dismissed", "Convicted"))
+
+# Create visualization
+ggplot(results, aes(x = year, y = case_count, fill = win, group = unit)) + 
+  geom_col(position = "stack") +
+  facet_wrap(~ unit) +
+  theme_minimal() +
+  labs(title = 'Case Defendant-Level Trial Conviction Counts of Trial Division vs. Other Units',
+      x = "Year", y = "Case Count", fill = "Case Outcome") + 
+  scale_x_continuous(breaks = seq(2019, 2025, by = 1)) + # Make sure the x-axis shows every year 
+  scale_fill_manual(values = c(
+    "Convicted"     = "royalblue",
+    "Acquitted" = "black", 
+    "Dismissed" = "slategrey")) +
+  # Add lines for Covid 
+  geom_vline(xintercept = 2020, color = "red", linetype = "dashed") + 
+  annotate("text", x = 2020, y = 96, label = "COVID Shutdown", color = "red", angle = 90, vjust = -1, size = 2) +
+  geom_vline(xintercept = 2021, color = "red", linetype = "dashed") + 
+  annotate("text", x = 2021, y = 98, label = "Full Reopening", color = "red", angle = 90, vjust = -1, size = 2)
+
+rm(results, unit_list, unit_results, results_list, plot_vis) # Remove dfs that will not be reused
+```
+
+But this doesn't tell the whole story, there are a lot of cases that are achieved without a trial, so this visualization is meant to show that: 
+```{r Defendant-Level Non-Trial Guilty Plea Counts for Trial Division vs. Other Units}
+# Use very similar code as above. 
+results_list <- list() # Create list for results 
+unit_list <- c("Trial Division", "Specialty Unit")
+
+plot_vis <- question13_df %>% # Create a column with if it belongs to the Trial Division or not 
+  filter(Unit != "No Unit Entered") %>% 
+  mutate(`Unit.Type` = if_else(Unit == "Trial Division", "Trial Division", "Specialty Unit")) %>% 
+  mutate(win = case_when(Disposition %in% conviction_list ~ "Plead Guilty", 
+                         Disposition %in% acquittals_list ~ "Acquitted" , 
+                         TRUE ~ "Dismissed"))  %>%
+  filter(Trial == FALSE) %>% 
+  filter(Trial != TRUE) %>% 
+  group_by(`Party.ID`, year) %>%  # Make into Case-Defendant level 
+    arrange(desc(Disposition %in% conviction_list)) %>% # Put convictions at the top of the list - Includes Pleas 
+    slice(1) %>% # Only keep first entry from each defendant group
+    ungroup()
+
+plot_vis$win <- factor(plot_vis$win, levels = c("Plead Guilty", "Dismissed","Acquitted"))
+
+# Create a loop for each division
+for(i in 1:length(unit_list)) { # Run one time for each division. So 2 times 
+  current_unit <- unit_list[i] # Keep track of which division we're on 
+
+  # Find and store the count of cases 
+  unit_results <- plot_vis %>% 
+    filter(`Unit.Type` == current_unit) %>%
+    group_by(year, win) %>% # Separate by year and if it was a win 
+    summarise(case_count = n()) %>% 
+    ungroup() %>% 
+    mutate(unit = current_unit)
+  
+  results_list[[i]] <- unit_results # Store the conviction rate df
+}
+results <- bind_rows(results_list) # Combine all of the df into one by year
+results$win <- factor(results$win, levels = c("Acquitted", "Dismissed", "Plead Guilty"))
+
+# Create visualization
+ggplot(results, aes(x = year, y = case_count, fill = win, group = unit)) + 
+  geom_col(position = "stack") +
+  facet_wrap(~ unit) +
+  theme_minimal() +
+  labs(title = 'Case Defendant Non-Trial Guilty Plea Counts for Trial Division vs. Other Units',
+      x = "Year", y = "Case Count", fill = "Case Outcome") + 
+  scale_x_continuous(breaks = seq(2019, 2025, by = 1)) + # Make sure the x-axis shows every year 
+  scale_fill_manual(values = c(
+    "Plead Guilty"= "blue",
+    "Acquitted" = "black", 
+    "Dismissed" = "slategrey")) +
+  # Add lines for Covid 
+  geom_vline(xintercept = 2020, color = "red", linetype = "dashed") + 
+  annotate("text", x = 2020, y = 2082, label = "COVID Shutdown", color = "red", angle = 90, vjust = -1, size = 2) +
+  geom_vline(xintercept = 2021, color = "red", linetype = "dashed") + 
+  annotate("text", x = 2021, y = 2115, label = "Full Reopening", color = "red", angle = 90, vjust = -1, size = 2)
+
+rm(results, unit_list, unit_results, results_list, plot_vis) # Remove dfs that will not be reused
+```
+
+# SVC 
+
+## Preparing the Datasets for Analysis 
+First, we are going to load the data sets. We are loading the 'Plea and Disposition Data', 'Case Attorney Data' and 'Case Sentencing Data'.  
+
+```{r loads Q11 datasets}
+# Used to matched cases with their attorney
+attorney_data <- read.csv("Data/Case Attorney Data.csv")
+
+# Used for Division Data 
+division_data <- read.csv("Data/Case Division Data _ Post Standing Order _ Post-Indictment Assignments(Sheet1).csv")
+```
+
+This question asks us to compare attorneys and judges from within the trial division, so we can start by filtering the `attorney data` to only include cases handled by the trial division and only keep the attorneys were never removed and thus closed the trial. 
+```{r filter attorney data to only include the trial division}
+attorney_data_cleaning <- attorney_data %>%
+  filter(`Unit` == "Trial Division") %>% # Filter out any division except for the Trial Division
+  filter(`Removed.Date` == "NULL") # Only keep the attorneys were never removed and thus closed the trial
+```
+
+This question asks us to compare the different Trial Division attorneys and judges. Thus, to do so, we need to be able to connect each case with it's respective judge. So, we are going to merge the 'Plea and Disposition Data' with the 'Case Attorney Data' and 'Case Division Data _ Post Standing Order _ Post-Indictment Assignments'.
+```{r merging plea and attorney datasets}
+# Keep only a few columns from the original dataset to be used for merging
+sentencing_data_cleaning_subset <- sentencing_data[,c("CaseNbr", "ChargeID", "Offense Code", "Offense","Plea","Disposition", "Disposition Date", "SentenceYears", "Sentence Type")] 
+attorney_data_cleaning_subset <- attorney_data_cleaning[,c("Case.Number", "Defendant.Name","Defendant.Party.ID","Attorney.Name", "Role", "Assigned.Date")] 
+division_data_cleaning_subset <- division_data[,c("Case.Number", "Division", "Case.ID")]
+
+# Combine datasets
+intial_question11_df <- merge(attorney_data_cleaning_subset, sentencing_data_cleaning_subset, by.x = "Case.Number", by.y = "CaseNbr", all.x = TRUE) 
+
+intial_question11_df <- intial_question11_df %>%
+  left_join(division_data_cleaning_subset, by = "Case.Number",  relationship = "many-to-many") %>%  # Check that these actually match
+  mutate(Trial = Case.Number %in% trial_data$Case.Number)
+```
+
+Since I am merging together a CSV and an XLSX dataframe, I want to rename some of the columns for consistency
+```{r rename sentencing data columns}
+intial_question11_df <- rename(intial_question11_df,
+                                Offense.Code = `Offense Code`, 
+                                Dispostion.Date = `Disposition Date`, 
+                                Sentence.Years = SentenceYears, 
+                                Sentence.Type = `Sentence Type`)
+```
+
+
+Now that I've created the primary dataset that I plan to use for this question I am going to remove some of the intermediary steps. For future questions, I'm probably going to have to adjust and use these datasets again, so I am going to remove them from my environment to prevent future confusion. 
+```{r removing unneeded dataframes}
+# Removes the datasets from the environment
+rm(attorney_data_cleaning_subset, attorney_data_cleaning, division_data_cleaning_subset, sentencing_data_cleaning_subset)
+```
+
+Now, since Q11 asks about "defendants charged initially with serious violent crime", I am going to filter the 'Plea and Disposition Data' so that it only includes these defendants. 
+
+To do so, I am going to group by party ID and the filter so that only defendants with one of the following predefined violent crimes remain: 
+
+| Offense | Offense Code | 
+| :--- | :---: |
+| Armed Robbery |16-8-41|
+| Kidnapping | 16-5-40 |
+| Aggravated Assault | 16-5-21 |
+| Aggravated Battery | 16-5-24 |
+| Trafficking | 16-13-31 |
+| Hijacking a Motor Vehicle | 16-5-44 |
+
+```{r filter for an initial charging of a serious violent crime}
+# Create a list containing all of the offense codes of interest 
+offense_codes <- c("16-8-41","16-5-40","16-5-21","16-5-24","16-13-31","16-5-44")
+offense_code_w_endings <- paste0("^(", paste(offense_codes, collapse="|"), ")($|[^0-9])") # Keeps offense codes in order, allows for different offense code endings, and makes sure that there are no additional code numbers on the end
+
+# Group by defendant and filter out irrelevant defendants  
+question11_df <- intial_question11_df %>%
+  mutate(Crime = case_when( # Create a column with crime type
+      grepl("^16-8-41",  Offense.Code) ~ "Armed Robbery",
+      grepl("^16-5-40",  Offense.Code) ~ "Kidnapping",
+      grepl("^16-5-21",  Offense.Code) ~ "Aggravated Assault",
+      grepl("^16-5-24",  Offense.Code) ~ "Aggravated Battery",
+      grepl("^16-13-31", Offense.Code) ~ "Drug Trafficking",
+      grepl("^16-5-44",  Offense.Code) ~ "Hijacking a Motor Vehicle")) %>%
+  group_by(`Defendant.Party.ID`) %>% # Group by party ID
+  filter(any(grepl(offense_code_w_endings, `Offense.Code`))) %>% #Gets rid of groups without any matching Offense Codes
+  ungroup() #Stops grouping my offender 
+
+rm(intial_question11_df)
+#Utilized AI for this block of code. See AI Use Statement Q11 2 at the end.
+```
+
+## Analyzing the Data
+
+Now, before I can look at anything division specific, I want to see the number of SVCs per division. 
+```{r Counts visualization of sentence type by division }
+division_list <- c("Division 1","Division 2","Division 3","Division 4","Division 5",
+                   "Division 6","Division 7","Division 8","Division 9", "Division 10")
+
+
+sentence_summary <- question11_df %>% # Prepare data by making it defendant-level by greatest charge 
+  filter(Division %in% division_list) %>% # remove rows with no division
+  filter(`Sentence.Type` != "NULL") %>% # Remove rows with no Sentence Type
+  filter(!is.na(Crime)) %>% # Remove extraneous crimes 
+  distinct(Defendant.Party.ID, Case.ID, Crime, .keep_all = TRUE) %>% # Only keep the SVCs
+  ungroup() 
+  
+count <- sentence_summary %>% 
+  group_by(Division, Sentence.Type) %>% 
+  summarize(total_case_count = n(), .groups = "drop") %>% 
+  ungroup()
+
+count$Sentence.Type <- factor(count$`Sentence.Type`, levels = c("House Arrest", "Suspended Sentence","Probation", "Confinement", "Confinement/Probation"))
+count$Division <- factor(count$Division, levels = c("Division 1","Division 2","Division 3","Division 4","Division 5","Division 6","Division 7","Division 8","Division 9", "Division 10"))
+
+# Create visualization
+ggplot(count, aes(x = Division, y = total_case_count, fill = Sentence.Type)) +
+  geom_bar(position = "stack", stat = "identity") +                           
+  theme_minimal() +
+  theme(legend.position = "right",axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Serious Violent Crimes Charge Sentencing Types by Trial Division",
+    x = "Division",
+    y = "Number of Sentences",
+    fill = "Sentence Type") + 
+  scale_fill_manual(values = c(
+    "Confinement" = "cornflowerblue",
+    "Confinement/Probation" = "royalblue3",
+    "House Arrest" = "tan4",  
+    "Probation" = "orange3"))
+
+rm(sentence_summary, count)
+```
+
+---------------------------------------------------------------------------------------
+
+# Appendix 
+
+
+## Statistical Testing 
+Now I want to use statistical testing to see what 
+```{r outgoing cases stats testing}
+annual_count <- list() # Create list for number of cases per crime 
+annual_list <- c("2019", "2020", "2021", "2022","2023","2024","2025")
+
+outgoing_sig_testing <- question12_df %>%
+  filter(!is.na(Event.Date)) %>%
+  mutate(Period = floor_date(Event.Date, unit = "3 months")) %>%
+  group_by(Period, Unit.Type) %>%
+  summarise(outgoing_count = n(), .groups = "drop")
+
+# Create time periods
+pre_covid <- outgoing_sig_testing %>%
+  filter(Period < as.Date("2020-03-13"))
+covid <- outgoing_sig_testing %>%
+  filter(Period >= as.Date("2020-03-13") & Period < as.Date("2021-06-21"))
+post_covid <- outgoing_sig_testing %>%
+  filter(Period >= as.Date("2021-06-21"))
+
+# Pre COVID t-test 
+special_outgoing_counts <- pre_covid %>%  # Special Units 
+  filter(Unit.Type == "Specialty Unit") %>%  
+  pull(outgoing_count)
+
+trial_outgoing_counts <- pre_covid %>%  # Trial Division
+  filter(Unit.Type == "Trial Division") %>%  
+  pull(outgoing_count)
+
+t.test(special_outgoing_counts,trial_outgoing_counts)
+
+# COVID t-test 
+special_outgoing_counts <- covid %>%  # Special Units 
+  filter(Unit.Type == "Specialty Unit")  %>%  
+  pull(outgoing_count)
+
+trial_outgoing_counts <- covid %>%  # Trial Division
+  filter(Unit.Type == "Trial Division") %>%  
+  pull(outgoing_count)
+
+
+t.test(special_outgoing_counts,trial_outgoing_counts)
+
+# Post-COVID t-test
+special_outgoing_counts <- post_covid %>%  # Special Units 
+  filter(Unit.Type == "Specialty Unit")  %>%  
+  pull(outgoing_count)
+
+trial_outgoing_counts <- post_covid %>%  # Trial Division
+  filter(Unit.Type == "Trial Division") %>%  
+  pull(outgoing_count)
+
+
+t.test(special_outgoing_counts,trial_outgoing_counts)
+```
+Thus, the difference between the count of outgoing cases for Special Units vs. Trial Division is significant for the pre-covid and post-covid periods. It is not significant for the during covid period, but this is likely due to the short nature of the shutdown period. 
+
+I would like to test to see if there is a statistically significant difference between the annual number of ALL Trial Division cases and the annual number of ALL special unit cases:
+```{r significance testing between groups all}
+annual_count <- list() # Create list for number of cases per crime 
+annual_list <- c("2019", "2020", "2021", "2022","2023","2024","2025")
+
+ # Prepare for significance testing 
+sig_testing <- question13_df %>% # Create a column with if it belongs to the Trial Division or not 
+  filter(Unit != "No Unit Entered") %>% 
+  mutate(`Unit.Type` = if_else(Unit == "Trial Division", "Trial Division", "Specialty Unit")) %>% 
+  group_by(`Party.ID`, year) %>%  # Make into Case-Defendant level 
+    slice(1) %>% # Order doesn't matter, I am only looking at the count 
+    ungroup()
+
+# Trial Division 
+trial_division_annual_counts <- sig_testing  %>%  
+  filter(Unit.Type == "Trial Division")
+for(i in 1:length(annual_list)) { # Run one time for each year 
+  current_year <- annual_list[i] 
+  year_count <-  trial_division_annual_counts %>%  # Create a placeholder to further filter data 
+    filter(year == current_year)  %>% # Filter for the year of interest
+    summarize(total_case_count = n()) # Count the annual years
+  year_count$year <- current_year # Add column to temp df with division and store df 
+  annual_count[[i]] <- year_count
+  } 
+results_annual <- bind_rows(annual_count) # Combine all of the dfs into one using "year" 
+testing_trial_division_data <- results_annual$total_case_count
+
+# Trial Division
+special_unit_annual_counts <- sig_testing  %>%  
+  filter(Unit.Type == "Specialty Unit")
+
+for(i in 1:length(annual_list)) { # Run one time for each year 
+  current_year <- annual_list[i] 
+  year_count <-  special_unit_annual_counts %>%  # Create a placeholder to further filter data 
+    filter(year == current_year)  %>% # Filter for the year of interest
+    summarize(total_case_count = n()) # Count the annual years
+  year_count$year <- current_year # Add column to temp df with division and store df 
+  annual_count[[i]] <- year_count
+  } 
+results_annual <- bind_rows(annual_count) # Combine all of the dfs into one using "year" 
+testing_special_unit_data <- results_annual$total_case_count
+
+# Run the t-test 
+t.test(testing_trial_division_data , testing_special_unit_data )
+```
+As I can see, I am 95% confident that the Trial Division handles between about 220 and 1558 more cases per year than Specialty Units. But, since the number of years is limited, the variation between years could slightly impact the reliability. 
+
+I would like to test to see if there is a statistically significant difference between the annual number of TRIED Trial Division cases and the annual number TRIED of special unit cases:
+```{r significance testing between groups all}
+annual_count <- list() # Create list for number of cases per crime 
+annual_list <- c("2019", "2020", "2021", "2022","2023","2024","2025")
+
+ # Prepare for significance testing 
+sig_testing <- question13_df %>% # Create a column with if it belongs to the Trial Division or not 
+  filter(Unit != "No Unit Entered") %>% 
+  filter(Trial == TRUE) %>% 
+  mutate(`Unit.Type` = if_else(Unit == "Trial Division", "Trial Division", "Specialty Unit")) %>% 
+  group_by(`Party.ID`, year) %>%  # Make into Case-Defendant level 
+    slice(1) %>% # Order doesn't matter, I am only looking at the count 
+    ungroup() %>%
+mutate(convicted_binary = if_else(Disposition %in% conviction_list, 1L, 0L)) # Mark for convictions 
+
+
+# Special Units 
+special_convict_annual_counts <- sig_testing  %>%  
+  filter(Unit.Type == "Specialty Unit")  %>%  
+  pull(convicted_binary)
+
+# Trial Division
+trial_convict_annual_counts <- sig_testing  %>%  
+  filter(Unit.Type == "Trial Division") %>%  
+  pull(convicted_binary)
+
+
+# Run the t-test 
+t.test(special_convict_annual_counts, trial_convict_annual_counts)
+
+rm(trial_convict_annual_counts, special_convict_annual_counts, sig_testing)
+```
+As I can see, this does not have a statistically significant difference.
+
+
+# Additional Figures 
+Now that the data has been prepared, we want to look at the **sentencing outcomes**. The first way that we are going to measure this is through a visualization of the number of convictions made by each judge between the years 2018 and 2025
+
+```{r visualize convictions per judge}
+# Lists 
+results_list <- list() # Create list for results 
+conviction_list <- c("Bench Verdict Guilty (Convicted/Adjudicated)", "First Offender Act - Pending", "First Offender Act Completed", "Guilty", "Jury Verdict Guilty (Convicted/Adjudicated)","First Offender Act Revoked", "First Offender Act Tolled", "First Offender Act Unsatisfactory")
+
+division_list <- c("Division 1","Division 2","Division 3","Division 4","Division 5",
+                   "Division 6","Division 7","Division 8","Division 9", "Division 10")
+
+# Create a loop for each division
+for(i in 1:length(division_list)) { # Run one time for each divison. So 10 times 
+  current_division <- division_list[i] # Keep track of which division we're on 
+  
+  conviction_count <- question11_df %>%  # Create a placeholder to further filter data 
+    filter(Division == current_division, Disposition %in% conviction_list) %>% # Filter for the division of interest
+    group_by(Defendant.Party.ID, Dispostion.Date) %>%  # Group by Party ID and Time
+      slice(1) %>% # Only keep first entry from each defendant/time group
+    summarize(total_conviction_count = n()) # Count the number of convictions per year
+  
+  # Find and store the conviction rates 
+  conviction_count$division <- current_division # Add column to conviction rate df with division
+  results_list[[i]] <- conviction_count} # Store the conviction rate df
+
+results <- bind_rows(results_list) # Combine all of the df into one by year 
+results$division <- factor(results$division, levels = division_list)
+
+# Create visualization
+ggplot(results, aes(x = division, y = total_conviction_count, fill = division)) + 
+  geom_col() +
+  theme_minimal() +
+   theme(legend.position = "right",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Total Defendant-Level Conviction Counts of Serious Violent Crimes by Trial Division",
+      x = "Division",
+      y = "Total Number of Convictions",
+      fill = "Division") + 
+  scale_fill_manual(values = c(
+    "Division 1" = "darkblue",
+    "Division 2" = "royalblue3",
+    "Division 3" = "cornflowerblue",
+    "Division 4" = "orchid4", 
+    "Division 5" = "sienna", 
+    "Division 6" = "tan4",  
+    "Division 7" = "orange3",
+    "Division 8" = "orange",
+    "Division 9" = "wheat",
+    "Division 10" = "slategrey")) 
+
+rm(results,results_list, conviction_count) # Remove dfs that will not be reused 
+```
+**Note:** Since it didn't perfectly match the information provided in the brief, choices were made regarding what should qualify as a conviction. 
+
+To build on the Serious Violent Crimes Charge Sentencing Types by Trial Division visualization, I am going to look at the sentencing length by division and by crime type in the three following ways: 
+
+First I need to create a filter it down to people who went to prison and then create a new variable for the length of time that someone was imprisoned.
+```{r filter for imprisoned and create a sentence length categories}
+division_list <- c("Division 1","Division 2","Division 3","Division 4","Division 5",
+                   "Division 6","Division 7","Division 8","Division 9", "Division 10")
+
+# Create a new column with the sentencing time 
+sentencing_times <- question11_df %>% 
+  filter(Division %in% division_list) %>% # remove rows with no division
+  filter(`Sentence.Type` == "Confinement"| `Sentence.Type` == "Confinement/Probation") %>% # Remove rows with no Sentence Type
+  filter(!is.na(Crime)) %>% # Remove extraneous crimes 
+  distinct(Defendant.Party.ID, Case.ID, Crime, .keep_all = TRUE) %>% # Only keep the SVCs
+  arrange(desc(Sentence.Years)) %>%
+  ungroup() %>% 
+  mutate(Sentence.Years = suppressWarnings(as.numeric(Sentence.Years)))  %>% # Make numeric 
+  mutate(Sentence.Time = case_when( 
+          is.na(`Sentence.Years`) ~ "Less than One Year",
+          Sentence.Years >= 5 ~ "Over Five Years",
+          Sentence.Years >= 1 ~ "One to Five Years", 
+          Sentence.Years == "NULL" ~ "Less than One Year",
+          Sentence.Years == "NA" ~ "Less than One Year")) %>% 
+  filter(!is.na(Sentence.Time))  # Get rid of remaining NAs 
+
+# Order levels 
+sentencing_times$`Sentence.Time` <- factor(sentencing_times$`Sentence.Time`, levels = c("Over Five Years", "One to Five Years", "Less than One Year"))
+sentencing_times$Division <- factor(sentencing_times$Division, levels = c("Division 1","Division 2","Division 3","Division 4","Division 5","Division 6","Division 7","Division 8","Division 9", "Division 10"))
+```
+
+Now I can create my first visualization: 
+```{r Counts SVC Crime Sentencing Time by Trial Division}
+count <- sentencing_times %>% 
+  group_by(Division, Sentence.Time) %>% 
+  summarize(total_case_count = n(), .groups = "drop") %>% 
+  ungroup()
+
+# Create visualization 
+ggplot(count, aes(x = Division, y = total_case_count, fill = Sentence.Time)) +
+  geom_bar(position = "stack", stat = "identity") +                           
+  theme_minimal() +
+  theme(legend.position = "right", axis.text.x = element_text(angle = 35, hjust = 1)) +
+  labs(
+    title = "Charge-Level Serious Violent Crime Sentencing Time by Trial Division",
+    x = "Division",
+    y = "Count of Sentences",
+    fill = "Sentence Time") + 
+  scale_fill_manual(values = c(
+    "Less than One Year" = "royalblue3",
+    "One to Five Years" = "darkblue",  
+    "Over Five Years" = "tan4"))
+rm(count)
+```
+
+Now, I want to specifically look at the sentencing time by crime: 
+```{r Counts SVC Crime Sentencing Time by Trial Division}
+count <- sentencing_times %>% 
+  group_by(Crime, Sentence.Time) %>% 
+  summarize(total_case_count = n(), .groups = "drop") %>% 
+  ungroup()
+
+# Create visualization 
+ggplot(count, aes(x = Crime, y = total_case_count, fill = Sentence.Time)) +
+  geom_bar(position = "stack", stat = "identity") +                           
+  theme_minimal() +
+  theme(legend.position = "right", axis.text.x = element_text(angle = 35, hjust = 1)) +
+  labs(
+    title = "Charge-Level Serious Violent Crime Sentencing Time by Crime",
+    x = "Crime Type",
+    y = "Count of Sentences",
+    fill = "Sentence Time") + 
+  scale_fill_manual(values = c(
+    "Less than One Year" = "royalblue3",
+    "One to Five Years" = "darkblue",  
+    "Over Five Years" = "tan4"))
+rm(count)
+```
+
+Finally, I can verify that there is enough data and then faccett this visualization by crime: 
+```{r Charge counts of SVC Sentencing Time by Division}
+sufficent_crime_list <- c("Aggravated Assault", "Armed Robbery")
+crimed_data <- sentencing_times %>% 
+  filter(Crime %in% sufficent_crime_list, Division != "Division 2") %>%
+  group_by(Crime, Sentence.Time, Division) %>% 
+  summarize(total_case_count = n(), .groups = "drop") %>% 
+  ungroup()
+
+# Create visualization 
+ggplot(crimed_data, aes(x = Division, y = total_case_count, fill = Sentence.Time)) +
+  geom_bar(position = "stack", stat = "identity") +                           
+  theme_minimal() +
+  facet_wrap(~ Crime, strip.position = "bottom") +
+  theme(legend.position = "right", axis.text.x = element_text(angle = 35, hjust = 1)) +
+  labs(
+    title = "Charge-Level Serious Violent Crime Sentencing Time by Division and Crime",
+    x = "Division",
+    y = "Number of Sentences", 
+    fill = "Sentence Time") + 
+  scale_fill_manual(values = c(
+    "Less than One Year" = "royalblue3",
+    "One to Five Years" = "darkblue",  
+    "Over Five Years" = "tan4"))
+
+rm(sufficent_crime_list, crimed_data, sentencing_times)
+```
+Additionally, for the last visualization in this chunk, I created a table with the number of charges per division/crime and I only included crimes with over 5 charges in each division in the final version of the visualization.  
+
+Next I want to look at the how sentencing varies depending on whether or not people plea. To do this, I am only going to look at the cases that went to trial and within that, I want to create categories for each defendant saying that they “Plead All Charges”, “Plead Some Charges”, or “Did not Plea”. and I will compare the sentencing across these categories. 
+
+I am going to filter the data to create a column for whether a defendant plead for all, some, or none of their charges. Also, I want to filter it down to the Case-Defendant level. 
+
+```{r}
+temp_df <- question11_df %>%
+    filter(Trial == TRUE) %>% # Only look at cases that went to trial 
+    group_by(Defendant.Party.ID) %>%
+    mutate(total_charges = n(), plea_count = sum(Plea == "Guilty" | # Count number of charges/pleas per group
+           Plea == "Guilty of Lesser Included Offense"| 
+           Plea == "Guilty but Mentally Ill"| 
+           Plea == "Guilty-Alford"),
+    Plea.Status = case_when(plea_count == 0 ~ "Did not Plea Guilty", 
+                  plea_count == total_charges ~ "Plead Guilty for All Charges", 
+                  plea_count < total_charges ~ "Plead Guilty for Some Charges")) %>% # Categorize Pleas
+  ungroup()
+temp_df$Plea.Status <- factor(temp_df$Plea.Status, levels = c("Plead Guilty for All Charges", "Plead Guilty for Some Charges", "Did not Plea Guilty")) 
+
+plot_vis <- temp_df %>% # create a new df that gets rid of repeated charges
+  group_by(Defendant.Party.ID, Crime) %>%
+  filter(!is.na(Crime)) %>% # Remove extraneous crimes 
+  distinct(Defendant.Party.ID, Crime, Plea.Status, .keep_all = TRUE)  # One row per defendant per crime type
+
+count <- plot_vis  %>% 
+  group_by(Crime, Plea.Status, Division) %>% 
+  summarize(total_case_count = n(), .groups = "drop") %>% 
+  ungroup()
+
+# Plot 
+ggplot(count, aes(x = Crime, y = total_case_count, fill = Plea.Status)) +
+  geom_bar(position ="stack", stat = "identity") +                           
+  theme_minimal() +
+  theme(legend.position = "right", axis.text.x = element_text(angle = 35, hjust = 1)) +
+  labs(title = "Defendant-Level Pleas by Serious Violent Crime Type",
+        x = "Crime Type",
+        y = "Proportion of Pleas",
+        fill = "Plea Type") + 
+  scale_fill_manual(values = c(
+                  "Did not Plea Guilty" = "orange4", 
+                  "Plead Guilty for All Charges"= "orchid4", 
+                  "Plead Guilty for Some Charges" = "tan3"))
+rm(plot_vis, temp_df, count)
+```
+I tried to investigate the differences in sentencing through a full trial process, but there were only 16 case defendants that fit the criteria (SVCs that were taken to trial and sentenced) thus I did not investigate further. 
+
+# AI USAGE 
+
+I used AI Tools in the following ways: 
+**Tool used:** ChatGPT
+**Purpose:** Helped to create a visualization.
+**Prompt Used:**
+  "Help me program in R. I am working with a dataset, that has a line for each purchase.  First I want to group all of the data together by customer ID and then I want to filter out the customers who did not buy something with any of the product IDs in a list" and later "Change the code so that it includes product ids with something at the end that is not a number"
+**Tasks Preformed independently:** I adjusted the variable titles, added descriptive comments, and filtered out repeated rows. 
+
+I used AI Tools in the following ways: 
+**Tool used:** Claude AI 
+**Purpose:** Assisting with basic data filtering and trouble shooting different `Offense Code` endings.
+**Prompt Used:**
+  "I am trying to import several excel files into the same data frame in r. How would I do this?"
+**Tasks Preformed independently:** I adjusted the file path, added descriptive comments, and filtered the data to remove duplicates.  
+
+I used AI Tools in the following ways: 
+**Tool used:** Claude AI 
+**Purpose:** Troubleshooting data parsing issues  
+**Prompt Used:**
+  "In R, I am trying to parse dates from an excel file that I turned into a CSV file. My current strategy works for some rows but not others. Help me fic this."
+**Tasks Preformed independently:**  I adjusted the labels to fit the data and then expanded it for all of the relevant columns. 
+  
+I used AI Tools in the following ways: 
+**Tool used:** Claude AI 
+**Purpose:** Assisting basic visualization creation. 
+**Prompt Used:**
+  "In R, I have a function that creates a table with 8 years and success rates for each year. It has two columns, year and success_rate. I want to take a that function and run it 10 times for each of 10 types of success and then use ggplot2 to create a visualization foreach one of the people's annual success rates. Help me code this please", "I want them all on the same graph", "No only run it once per person, but show the data for each year", and "It is only showing me the final person. What am I messing up?"
+**Tasks Preformed independently:**  I adjusted variable titles, corrected the code, added descriptive comments, adjusted visualization formatting, and rewrote portions of the code for accuracy, and removed leftover dataframes.
+
+I used AI Tools in the following ways: 
+**Tool used:** ChatGPT
+**Purpose:** Helped to create a visualization.
+**Prompt Used:**
+  "Help me program in R. I am working with a dataset, that has a line for each purchase.  First I want to group all of the data together by customer ID and then I want to filter out the customers who did not buy something with any of the product IDs in a list" and later "Change the code so that it includes product ids with something at the end that is not a number"
+**Tasks Preformed independently:** I adjusted the variable titles, added descriptive comments, and filtered out repeated rows. 
+
+
+
+
+
+
+
+
+
+
+
+
+
